@@ -1,6 +1,6 @@
 bl_info = {
     "name": "Retarget to Empties",
-    "author": "Slay",
+    "author": "JessAndn",
     "version": (1, 0, 0),
     "blender": (5, 0, 0),
     "location": "View3D > N Sidebar > Retarget",
