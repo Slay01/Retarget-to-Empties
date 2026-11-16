@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Retarget to Empties",
     "author": "JessAndn",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (5, 0, 0),
     "location": "View3D > N Sidebar > Retarget",
     "description": "Bi-directional IK retargeting via Empties to isolate movement channels, clean curves for NLA blending, and extract clean Root Motion for game engines.",
@@ -72,6 +72,8 @@ def register_scene_props():
             bpy.props.PointerProperty(type=RETargetSlot),
         )
 
+    scene.retarget_root_bone = bpy.props.PointerProperty(type=RETargetSlot)
+
     scene.retarget_armature = bpy.props.PointerProperty(
         type=bpy.types.Object,
         name="Source Armature",
@@ -87,6 +89,9 @@ def unregister_scene_props():
         prop_name = f"retarget_{key}"
         if hasattr(scene, prop_name):
             delattr(scene, prop_name)
+
+    if hasattr(scene, "retarget_root_bone"):
+        delattr(scene, "retarget_root_bone")
 
     if hasattr(scene, "retarget_armature"):
         delattr(scene, "retarget_armature")
@@ -163,6 +168,8 @@ def _get_or_create_retarget_collection(context):
 
 
 def _slot_property(scene, slot_key):
+    if slot_key == "root_bone":
+        return getattr(scene, "retarget_root_bone", None)
     valid_keys = {key for key, _, _ in SLOTS_CONFIG}
     if slot_key not in valid_keys:
         return None
@@ -299,9 +306,12 @@ class RETARGET_OT_pick_bone(Operator):
         slot_prop.bone_name = bone_name
 
         if not slot_prop.empty_name:
-            slot_prop.empty_name = (
-                f"RET_{self.slot.replace('_', ' ').title()}"
-            )
+            if self.slot == "root_bone":
+                slot_prop.empty_name = "RET_Root_Motion"
+            else:
+                slot_prop.empty_name = (
+                    f"RET_{self.slot.replace('_', ' ').title()}"
+                )
 
         self.report({'INFO'}, f"Hueso capturado: {bone_name}")
         return {'FINISHED'}
@@ -450,10 +460,12 @@ class RETARGET_OT_create_empty(Operator):
         slot_prop.created = True
 
         copy_location = empty.constraints.new('COPY_LOCATION')
+        copy_location.name = "RET_Copy Location"
         copy_location.target = armature
         copy_location.subtarget = bone.name
 
         copy_rotation = empty.constraints.new('COPY_ROTATION')
+        copy_rotation.name = "RET_Copy Rotation"
         copy_rotation.target = armature
         copy_rotation.subtarget = bone.name
         copy_rotation.owner_space = 'WORLD'
@@ -637,11 +649,13 @@ class RETARGET_OT_apply_to_rig(Operator):
                     pose_bone.constraints.remove(constraint)
 
             copy_location = pose_bone.constraints.new('COPY_LOCATION')
+            copy_location.name = "RET_Copy Location"
             copy_location.target = empty
             copy_location.owner_space = 'WORLD'
             copy_location.target_space = 'WORLD'
 
             copy_rotation = pose_bone.constraints.new('COPY_ROTATION')
+            copy_rotation.name = "RET_Copy Rotation"
             copy_rotation.target = empty
             copy_rotation.owner_space = 'WORLD'
             copy_rotation.target_space = 'WORLD'
@@ -656,7 +670,7 @@ class RETARGET_OT_apply_to_rig(Operator):
 
 
 class RETARGET_OT_select_rig_and_open_bake(Operator):
-    """Selecciona Source Armature en Pose Mode y abre el menú de Bake."""
+    """Selecciona Source Armature en Pose Mode, selecciona los huesos del retarget y abre Bake."""
     bl_idname = "retarget.select_rig_and_open_bake"
     bl_label = "Select Rig & Bake"
     bl_options = {'REGISTER', 'UNDO'}
@@ -672,9 +686,42 @@ class RETARGET_OT_select_rig_and_open_bake(Operator):
             self.report({'ERROR'}, f"No se pudo activar Source Armature: {exc}")
             return {'CANCELLED'}
 
+        # Deseleccionar todos los huesos en Pose Mode primero
+        for pb in armature.pose.bones:
+            pb.select = False
+
+        # Seleccionar únicamente los huesos que tienen par válido (Hueso + Empty) en el retarget
+        selected_bones = 0
+        last_bone = None
+        for key, _, _ in SLOTS_CONFIG:
+            slot_prop = _slot_property(context.scene, key)
+            if not slot_prop.bone_name:
+                continue
+
+            empty = _get_slot_empty(context, armature, key, adopt_legacy=True)
+            if empty is None:
+                continue
+
+            pose_bone = armature.pose.bones.get(slot_prop.bone_name)
+            bone_data = armature.data.bones.get(slot_prop.bone_name)
+            if pose_bone and bone_data:
+                pose_bone.select = True
+                last_bone = bone_data
+                selected_bones += 1
+
+        if last_bone:
+            armature.data.bones.active = last_bone
+
+        if selected_bones == 0:
+            self.report(
+                {'WARNING'},
+                "No se encontraron huesos activos con Empty válido para seleccionar en Pose Mode.",
+            )
+            return {'CANCELLED'}
+
         self.report(
             {'INFO'},
-            f"'{armature.name}' activa en Pose Mode y lista para Bake.",
+            f"'{armature.name}' en Pose Mode con {selected_bones} hueso(s) seleccionado(s) listo para Bake.",
         )
 
         try:
@@ -742,8 +789,319 @@ class RETARGET_OT_clear_rig_constraints(Operator):
         return {'FINISHED'}
 
 
+# ──────────────────────────────────────────────
+# 4.5. OPERADORES PARTE 3: TORSO → ROOT MOTION
+# ──────────────────────────────────────────────
+class RETARGET_OT_create_root_empty(Operator):
+    """Crea un Empty a la altura y posición del Root Bone que copia X/Y del Torso con Offset (Z desactivado)."""
+    bl_idname = "retarget.create_root_empty"
+    bl_label = "Create Root Motion Empty"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+
+        root_slot = _slot_property(context.scene, "root_bone")
+        torso_slot = _slot_property(context.scene, "torso")
+
+        if not root_slot or not root_slot.bone_name:
+            self.report({'ERROR'}, "Asigna primero el hueso Root en la sección Root Motion.")
+            return {'CANCELLED'}
+
+        if not torso_slot or not torso_slot.bone_name:
+            self.report({'ERROR'}, "Asigna primero el hueso Torso en la lista principal.")
+            return {'CANCELLED'}
+
+        root_bone = _get_bone(armature, root_slot.bone_name)
+        torso_bone = _get_bone(armature, torso_slot.bone_name)
+
+        if not root_bone:
+            self.report({'ERROR'}, f"Hueso Root '{root_slot.bone_name}' no encontrado en Source Armature.")
+            return {'CANCELLED'}
+
+        if not torso_bone:
+            self.report({'ERROR'}, f"Hueso Torso '{torso_slot.bone_name}' no encontrado en Source Armature.")
+            return {'CANCELLED'}
+
+        existing = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False)
+        if existing:
+            self.report({'WARNING'}, f"Ya existe el Empty de Root Motion: '{existing.name}'.")
+            return {'CANCELLED'}
+
+        pose_root = armature.pose.bones.get(root_bone.name)
+        if not pose_root:
+            self.report({'ERROR'}, "No se encontró el Pose Bone del Root.")
+            return {'CANCELLED'}
+
+        base_name = root_slot.empty_name or "RET_Root_Motion"
+        empty_name = base_name
+        suffix = 1
+        while empty_name in bpy.data.objects:
+            empty_name = f"{base_name}_{suffix:02d}"
+            suffix += 1
+
+        empty = bpy.data.objects.new(empty_name, None)
+        collection = _get_or_create_retarget_collection(context)
+        collection.objects.link(empty)
+
+        # Posicionado exactamente en la altura y posición mundial del Root Bone
+        empty.location = armature.matrix_world @ pose_root.head
+        empty.empty_display_type = 'ARROWS'
+        empty.empty_display_size = 0.4
+
+        empty[OWNER_PROP] = armature.name
+        empty[SLOT_PROP] = "root_bone"
+
+        root_slot.empty_name = empty.name
+        root_slot.created = True
+
+        # Copy Location desde el Torso con Offset activado y eje Z desactivado
+        cl = empty.constraints.new('COPY_LOCATION')
+        cl.name = "RET_Copy Location"
+        cl.target = armature
+        cl.subtarget = torso_bone.name
+        cl.use_x = True
+        cl.use_y = True
+        cl.use_z = False
+        cl.use_offset = True
+        cl.owner_space = 'WORLD'
+        cl.target_space = 'WORLD'
+
+        self.report({'INFO'}, f"Root Motion Empty creado: '{empty.name}' copiando XY (Offset) de '{torso_bone.name}'.")
+        return {'FINISHED'}
+
+
+class RETARGET_OT_clear_root_constraints(Operator):
+    """Elimina las restricciones tanto del Root Motion Empty como del Root Bone."""
+    bl_idname = "retarget.clear_root_constraints"
+    bl_label = "Clear Root Constraints"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+
+        root_slot = _slot_property(context.scene, "root_bone")
+        empty = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False)
+
+        empty_cleared = 0
+        bone_cleared = 0
+
+        if empty and empty.constraints:
+            empty.constraints.clear()
+            empty_cleared = 1
+
+        if root_slot and root_slot.bone_name:
+            try:
+                _activate_armature_pose(context, armature)
+                pose_root = armature.pose.bones.get(root_slot.bone_name)
+                if pose_root:
+                    for c in list(pose_root.constraints):
+                        if (
+                            c.type in {'COPY_LOCATION', 'COPY_ROTATION'}
+                            and (
+                                (empty is not None and c.target == empty)
+                                or c.name.startswith("RET_")
+                            )
+                        ):
+                            pose_root.constraints.remove(c)
+                            bone_cleared += 1
+            except Exception:
+                pass
+
+        self.report(
+            {'INFO'},
+            f"Constraints de Root limpiados (Empty: {empty_cleared}, Bone: {bone_cleared}).",
+        )
+        return {'FINISHED'}
+
+
+class RETARGET_OT_bake_root_empty(Operator):
+    """Selecciona el Empty de Root Motion y abre el menú de Bake."""
+    bl_idname = "retarget.bake_root_empty"
+    bl_label = "Select Root Empty & Bake"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+
+        empty = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False)
+        if not empty:
+            self.report({'WARNING'}, "No hay un Empty de Root Motion creado para esta armature.")
+            return {'CANCELLED'}
+
+        try:
+            _ensure_object_mode(context)
+            bpy.ops.object.select_all(action='DESELECT')
+            empty.select_set(True)
+            context.view_layer.objects.active = empty
+
+            self.report({'INFO'}, f"Empty '{empty.name}' seleccionado para Bake.")
+            try:
+                bpy.ops.nla.bake('INVOKE_DEFAULT', visual_keying=True, clear_constraints=False)
+            except Exception:
+                bpy.ops.object.bake_action('INVOKE_DEFAULT')
+        except Exception as exc:
+            self.report({'ERROR'}, f"No se pudo preparar el Bake: {exc}")
+            return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+
+class RETARGET_OT_apply_root_to_bone(Operator):
+    """Transfiere la ubicación del Root Motion Empty al Root Bone."""
+    bl_idname = "retarget.apply_root_to_bone"
+    bl_label = "Empty → Root Bone (Apply)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+
+        root_slot = _slot_property(context.scene, "root_bone")
+        if not root_slot or not root_slot.bone_name:
+            self.report({'ERROR'}, "Asigna un Root Bone primero.")
+            return {'CANCELLED'}
+
+        empty = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False)
+        if not empty:
+            self.report({'ERROR'}, "No se encontró el Empty de Root Motion.")
+            return {'CANCELLED'}
+
+        pose_root = armature.pose.bones.get(root_slot.bone_name)
+        if not pose_root:
+            self.report({'ERROR'}, f"Pose Bone '{root_slot.bone_name}' no encontrado.")
+            return {'CANCELLED'}
+
+        try:
+            _activate_armature_pose(context, armature)
+        except Exception as exc:
+            self.report({'ERROR'}, f"No se pudo activar Source Armature: {exc}")
+            return {'CANCELLED'}
+
+        for c in list(pose_root.constraints):
+            if c.type == 'COPY_LOCATION' and c.target == empty:
+                pose_root.constraints.remove(c)
+
+        cl = pose_root.constraints.new('COPY_LOCATION')
+        cl.name = "RET_Copy Location"
+        cl.target = empty
+        cl.use_x = True
+        cl.use_y = True
+        cl.use_z = False
+        cl.owner_space = 'WORLD'
+        cl.target_space = 'WORLD'
+
+        self.report({'INFO'}, f"Constraint aplicada al Root Bone '{pose_root.name}'.")
+        return {'FINISHED'}
+
+
+class RETARGET_OT_select_root_and_bake(Operator):
+    """Selecciona únicamente el Root Bone en Pose Mode y abre el menú de Bake."""
+    bl_idname = "retarget.select_root_and_bake"
+    bl_label = "Select Root Bone & Bake"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+
+        root_slot = _slot_property(context.scene, "root_bone")
+        if not root_slot or not root_slot.bone_name:
+            self.report({'ERROR'}, "Asigna un Root Bone primero.")
+            return {'CANCELLED'}
+
+        pose_root = armature.pose.bones.get(root_slot.bone_name)
+        bone_data = armature.data.bones.get(root_slot.bone_name)
+        if not pose_root or not bone_data:
+            self.report({'ERROR'}, f"Root Bone '{root_slot.bone_name}' no encontrado.")
+            return {'CANCELLED'}
+
+        try:
+            _activate_armature_pose(context, armature)
+        except Exception as exc:
+            self.report({'ERROR'}, f"No se pudo activar Source Armature: {exc}")
+            return {'CANCELLED'}
+
+        for pb in armature.pose.bones:
+            pb.select = False
+
+        pose_root.select = True
+        armature.data.bones.active = bone_data
+
+        self.report({'INFO'}, f"Root Bone '{pose_root.name}' seleccionado en Pose Mode para Bake.")
+
+        try:
+            bpy.ops.nla.bake('INVOKE_DEFAULT', visual_keying=True, clear_constraints=False)
+        except Exception:
+            try:
+                bpy.ops.object.bake_action('INVOKE_DEFAULT')
+            except Exception as exc:
+                self.report({'ERROR'}, f"No se pudo abrir el menú de Bake: {exc}")
+                return {'CANCELLED'}
+
+        return {'FINISHED'}
+
+
+class RETARGET_OT_clean_root_motion(Operator):
+    """Elimina la restricción del Root Bone y borra el Empty de Root Motion."""
+    bl_idname = "retarget.clean_root_motion"
+    bl_label = "Clean Root Motion Setup"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+
+        root_slot = _slot_property(context.scene, "root_bone")
+        empty = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False)
+
+        constraints_removed = 0
+        if root_slot and root_slot.bone_name:
+            try:
+                _activate_armature_pose(context, armature)
+                pose_root = armature.pose.bones.get(root_slot.bone_name)
+                if pose_root:
+                    for c in list(pose_root.constraints):
+                        if (
+                            c.type in {'COPY_LOCATION', 'COPY_ROTATION'}
+                            and (
+                                (empty is not None and c.target == empty)
+                                or c.name.startswith("RET_")
+                            )
+                        ):
+                            pose_root.constraints.remove(c)
+                            constraints_removed += 1
+            except Exception:
+                pass
+
+        empty_removed = _remove_empty_if_owned(context, armature, "root_bone")
+        if root_slot:
+            root_slot.empty_name = ""
+            root_slot.created = False
+
+        _remove_empty_collection_if_unused()
+
+        self.report(
+            {'INFO'},
+            f"Root Motion limpiado: {constraints_removed} restricción(es) y {int(empty_removed)} Empty eliminado(s).",
+        )
+        return {'FINISHED'}
+
+
+# ──────────────────────────────────────────────
+# 4.6. LIMPIEZA DE CURVAS (PARTE 2) Y LIMPIEZA FINAL DEL SETUP
+# ──────────────────────────────────────────────
 class RETARGET_OT_clean_curves_and_empties(Operator):
-    """Limpia solo Source Armature, sus curvas configuradas y sus Empties."""
+    """Limpia restricciones de retarget, Empties de Part 1/2 y curvas Location de articulaciones."""
     bl_idname = "retarget.clean_curves_and_empties"
     bl_label = "Clean Curves and Empties"
     bl_options = {'REGISTER', 'UNDO'}
@@ -758,8 +1116,6 @@ class RETARGET_OT_clean_curves_and_empties(Operator):
         )
         registered_empty_names = {empty.name for empty in registered_empties}
 
-        # 1. Eliminar restricciones de retarget solo en los huesos de esta armature
-        # y solo si apuntan a Empties registrados para ella.
         constraints_removed = 0
 
         try:
@@ -786,8 +1142,6 @@ class RETARGET_OT_clean_curves_and_empties(Operator):
                     pose_bone.constraints.remove(constraint)
                     constraints_removed += 1
 
-        # 2. Eliminar exclusivamente F-Curves de Location de articulaciones.
-        # Blender 5.x organiza las curvas en Action -> Layers -> Strips -> Channelbags.
         curves_removed = 0
         anim_data = armature.animation_data
         action = anim_data.action if anim_data else None
@@ -829,7 +1183,6 @@ class RETARGET_OT_clean_curves_and_empties(Operator):
                 "La Action no tiene Action Slot activo; no se modificaron curvas.",
             )
 
-        # 3. Eliminar solo los Empties validados para esta Source Armature.
         empties_removed = 0
         for key, _, _ in SLOTS_CONFIG:
             if _remove_empty_if_owned(context, armature, key):
@@ -847,6 +1200,70 @@ class RETARGET_OT_clean_curves_and_empties(Operator):
             f"{constraints_removed} restricciones, "
             f"{curves_removed} curvas Location y "
             f"{empties_removed} Empties eliminados.",
+        )
+        return {'FINISHED'}
+
+
+class RETARGET_OT_clean_all_setup(Operator):
+    """Elimina todos los Empties y constraints creados por el addon (sin borrar curvas de animación)."""
+    bl_idname = "retarget.clean_all_setup"
+    bl_label = "Clean Setup (Empties & Constraints)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+
+        registered_empties = _get_registered_empties(
+            context, armature, adopt_legacy=True
+        )
+        registered_empty_names = {empty.name for empty in registered_empties}
+
+        root_empty = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False)
+        if root_empty:
+            registered_empty_names.add(root_empty.name)
+
+        constraints_removed = 0
+        try:
+            _activate_armature_pose(context, armature)
+            for pose_bone in armature.pose.bones:
+                for constraint in list(pose_bone.constraints):
+                    if (
+                        constraint.type in {'COPY_LOCATION', 'COPY_ROTATION'}
+                        and (
+                            (constraint.target is not None and constraint.target.name in registered_empty_names)
+                            or constraint.name.startswith("RET_")
+                        )
+                    ):
+                        pose_bone.constraints.remove(constraint)
+                        constraints_removed += 1
+        except Exception as exc:
+            self.report({'ERROR'}, f"No se pudo limpiar constraints del Rig: {exc}")
+            return {'CANCELLED'}
+
+        empties_removed = 0
+        for key, _, _ in SLOTS_CONFIG:
+            if _remove_empty_if_owned(context, armature, key):
+                empties_removed += 1
+            slot_prop = _slot_property(context.scene, key)
+            slot_prop.empty_name = ""
+            slot_prop.created = False
+
+        if _remove_empty_if_owned(context, armature, "root_bone"):
+            empties_removed += 1
+
+        root_slot = _slot_property(context.scene, "root_bone")
+        if root_slot:
+            root_slot.empty_name = ""
+            root_slot.created = False
+
+        _remove_empty_collection_if_unused()
+
+        self.report(
+            {'INFO'},
+            f"Setup limpiado en '{armature.name}': "
+            f"{constraints_removed} constraints y {empties_removed} Empties eliminados (curvas conservadas).",
         )
         return {'FINISHED'}
 
@@ -976,6 +1393,7 @@ class RETARGET_PT_panel(Panel):
 
         layout.separator()
 
+        # --- PART 1: RIG -> EMPTIES ---
         part_one = layout.box()
         part_one.label(
             text="Part 1: Rig → Empties",
@@ -995,6 +1413,7 @@ class RETARGET_PT_panel(Panel):
 
         layout.separator()
 
+        # --- PART 2: EMPTIES -> RIG ---
         part_two = layout.box()
         part_two.label(
             text="Part 2: Empties → Rig",
@@ -1013,10 +1432,90 @@ class RETARGET_PT_panel(Panel):
             icon='RENDER_ANIMATION',
         )
 
-        layout.separator()
-        layout.operator(
+        part_two.separator()
+        part_two.operator(
             "retarget.clean_curves_and_empties",
             icon='TRASH',
+        )
+        warn_col = part_two.column(align=True)
+        warn_col.scale_y = 0.8
+        warn_col.label(
+            text="Warning: Location curves of joints",
+            icon='ERROR',
+        )
+        warn_col.label(
+            text="(Chest, Head, Elbows, Knees) will be deleted.",
+            icon='BLANK1',
+        )
+
+        layout.separator()
+
+        # --- PART 3: TORSO -> ROOT MOTION ---
+        part_three = layout.box()
+        part_three.label(
+            text="Part 3: Torso → Root Motion",
+            icon='ORIENTATION_GLOBAL',
+        )
+
+        root_slot = _slot_property(scene, "root_bone")
+        row_root = part_three.row(align=True)
+        if armature and armature.data:
+            row_root.prop_search(
+                root_slot,
+                "bone_name",
+                armature.data,
+                "bones",
+                text="Root Bone",
+            )
+        else:
+            row_root.prop(root_slot, "bone_name", text="Root Bone")
+
+        pick_root = row_root.operator("retarget.pick_bone", icon='BONE_DATA', text="")
+        pick_root.slot = "root_bone"
+
+        sel_root = row_root.operator("retarget.select_bone_in_viewport", icon='ZOOM_ALL', text="")
+        sel_root.slot = "root_bone"
+
+        clr_root = row_root.operator("retarget.clear_slot", icon='X', text="")
+        clr_root.slot = "root_bone"
+
+        row_rm_create = part_three.row(align=True)
+        row_rm_create.operator("retarget.create_root_empty", icon='EMPTY_ARROWS')
+        valid_root_empty = (
+            _get_slot_empty(context, armature, "root_bone", adopt_legacy=False)
+            if armature else None
+        )
+        row_rm_create.label(
+            text="",
+            icon='CHECKMARK' if valid_root_empty else 'BLANK1',
+        )
+
+        part_three.operator(
+            "retarget.clear_root_constraints",
+            icon='CONSTRAINT_BONE',
+        )
+        part_three.operator("retarget.bake_root_empty", icon='RENDER_ANIMATION')
+        part_three.operator("retarget.apply_root_to_bone", icon='CON_LOCLIKE')
+        part_three.operator("retarget.select_root_and_bake", icon='BONE_DATA')
+        part_three.operator("retarget.clean_root_motion", icon='TRASH')
+
+        layout.separator()
+
+        # --- BOTÓN FINAL: LIMPIAR TODO EL SETUP (SOLO EMPTIES Y CONSTRAINTS) ---
+        clean_box = layout.box()
+        clean_box.operator(
+            "retarget.clean_all_setup",
+            icon='TRASH',
+        )
+        info_col = clean_box.column(align=True)
+        info_col.scale_y = 0.8
+        info_col.label(
+            text="Deletes all addon Empties & RET_ constraints.",
+            icon='INFO',
+        )
+        info_col.label(
+            text="Animation curves are preserved.",
+            icon='BLANK1',
         )
 
 
@@ -1035,7 +1534,14 @@ classes = (
     RETARGET_OT_apply_to_rig,
     RETARGET_OT_select_rig_and_open_bake,
     RETARGET_OT_clear_rig_constraints,
+    RETARGET_OT_create_root_empty,
+    RETARGET_OT_clear_root_constraints,
+    RETARGET_OT_bake_root_empty,
+    RETARGET_OT_apply_root_to_bone,
+    RETARGET_OT_select_root_and_bake,
+    RETARGET_OT_clean_root_motion,
     RETARGET_OT_clean_curves_and_empties,
+    RETARGET_OT_clean_all_setup,
     RETARGET_OT_clear_all,
     RETARGET_PT_panel,
 )
