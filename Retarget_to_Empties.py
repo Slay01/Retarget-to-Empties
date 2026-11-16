@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Retarget to Empties",
-    "author": "JessAndn",
-    "version": (1, 1, 0),
+    "author": "Slay",
+    "version": (1, 0, 1),
     "blender": (5, 0, 0),
     "location": "View3D > N Sidebar > Retarget",
     "description": "Bi-directional IK retargeting via Empties to isolate movement channels, clean curves for NLA blending, and extract clean Root Motion for game engines.",
@@ -1409,6 +1409,21 @@ class RETARGET_PT_panel(Panel):
         part_one.operator(
             "retarget.select_and_open_bake",
             icon='RENDER_ANIMATION',
+        )
+
+        layout.separator()
+
+        # Advertencia: Antes de seguir desactivar los Actions Strips!
+        reminder_box = layout.box()
+        col_rem = reminder_box.column(align=True)
+        col_rem.scale_y = 0.8
+        col_rem.label(
+            text="Remember to mute original animation",
+            icon='INFO',
+        )
+        col_rem.label(
+            text="strips/actions before starting Part 2.",
+            icon='BLANK1',
         )
 
         layout.separator()
