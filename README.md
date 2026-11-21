@@ -1,60 +1,101 @@
-# Retarget to Empties (Blender Addon)
+Retarget to Empties (Blender Extension)
 
-Un complemento de producción para **Blender** diseñado para asistir en flujos de trabajo de animación mediante *retargeting* bidireccional asistido por objetos `Empty`. 
+A production add-on for Blender designed to support animation workflows through bi-directional retargeting using Empty objects.
 
-Su objetivo principal es **aislar canales de movimiento** (traslación y rotación), limpiar curvas innecesarias y retransferir la animación de forma limpia de vuelta a un Rig. Es una herramienta ideal para **combinar animaciones incompatibles en el Non-Linear Animation (NLA) Editor** y para **extraer *Root Motion* limpio** listo para motores de videojuegos (Unreal Engine, Unity, Godot, etc.).
+Its primary goal is to isolate movement channels (location and rotation), extract clean Root Motion, retarget props or weapons, and clean up unnecessary curves before transferring animation back to a rig. It is well suited for blending incompatible animations in the Non-Linear Animation (NLA) Editor and preparing animations for game engines (Unreal Engine, Unity, Godot, and others).
 
----
+⚠️ Scope and Compatibility
 
-## ⚠️ Alcance y Compatibilidad de Rigging
+Built for IK chains and global pivots: This workflow transfers transforms in World Space. It is intended for IK controllers, limbs, Root Bones, and props/weapons. It is not designed for pure hierarchical FK chains.
 
-* **Diseñado para cadenas IK:** Este flujo de trabajo opera transfiriendo transformaciones en espacio mundial (*World Space*). Por ello, está pensado exclusivamente para **controladores IK**, extremidades y puntos de pivote globales. **No está diseñado para cadenas FK jerárquicas puras.**
-* **Versión de Blender:** Optimizado para la arquitectura moderna de animación (compatible con sistemas de *Action Layers / Channelbags* de Blender 4.x / 5.x).
+Blender Version: Built for Blender 5.0+ and its modern animation architecture (Action Layers / Channelbags and the official Blender Extensions format).
 
----
+✨ Key Features
 
-## ✨ Características Principales
+Strict Isolation (Source Armature): Requires explicitly assigning the source rig. Each generated Empty stores owner metadata to avoid interfering with or breaking other rigs in complex scenes.
 
-* **Aislamiento Estricto (*Source Armature*):** Requiere designar explícitamente el esqueleto de origen. Cada `Empty` generado guarda metadatos de propietario, evitando interferir o corromper otros rigs en escenas complejas.
-* **Organización Automática:** Todos los proxies se agrupan automáticamente dentro de una colección dedicada (`RETARGET_Empties`) para mantener el *Outliner* limpio.
-* **Limpieza Selectiva de Curvas:** Al finalizar el proceso, distingue automáticamente entre:
-  * **Extremidades** (*Hands, Feet, Torso*): Conservan sus curvas de *Location* y *Rotation*.
-  * **Articulaciones / Pole Targets** (*Chest, Head, Elbows, Knees*): Purga automáticamente las curvas residuales de *Location*, manteniendo únicamente la rotación necesaria.
+Automatic Collection Organization:
 
----
+RETARGET_Empties: Groups character and Root Motion proxy empties.
 
-## 🔄 Flujo de Trabajo (Workflow)
+RETARGET_Prop_Empties: Groups independent proxy empties created for weapons, shields, or accessories.
 
-El panel se encuentra en la barra lateral de la vista 3D: **`N Sidebar > Retarget`**.
+Selective Curve Cleanup:
 
-### Preparación
-1. Selecciona tu esqueleto en el campo **Source Armature (Required)**.
-2. Despliega los slots de las extremidades y articulaciones que necesites (puedes usar el gotero para capturar el hueso activo en *Pose Mode* o buscarlo por nombre).
+Limbs (Hands, Feet, Torso): Preserve both Location and Rotation curves.
 
-### Parte 1: Rig → Empties (Extracción y Aislamiento)
-1. Haz clic en **Create All Empties** para generar los proxies vinculados en el espacio mundial.
-2. Haz clic en **Auto-Select Empties & Bake** para seleccionar automáticamente todos los proxies y abrir el menú de *Bake* (asegúrate de activar *Visual Keying*).
-3. Haz clic en **Clear Empties Constraints** para liberar los `Empties` de las restricciones del Rig original. *(En este punto puedes editar los proxies, ajustar trayectorias o reorientar el movimiento raíz).*
+Joints / Pole Targets (Chest, Head, Elbows, Knees): Optionally remove residual Location curves while keeping rotation intact.
 
-### Parte 2: Empties → Rig (Retransferencia y Limpieza)
-1. Haz clic en **Empties → Rig (Apply Retarget)** para vincular los controladores de tu Rig a los `Empties` editados.
-2. Haz clic en **Select Rig & Bake** (el addon activará automáticamente el esqueleto en *Pose Mode* y abrirá el menú de *Bake*).
-3. Finalmente, haz clic en **Clean Curves and Empties**:
-   * Elimina las restricciones temporales del Rig.
-   * Borra las *F-Curves* de traslación (*Location*) en las articulaciones.
-   * Elimina todos los `Empties` y purga la colección temporal si queda vacía.
+Root Motion Extraction (Torso → Root): Projects horizontal movement (X / Y with Offset, with Z disabled) from the torso bone to the Root Bone.
 
----
+Prop and Weapon Retargeting (5 Slots): Captures motion from directly animated objects (Object / Mesh, displayed as a single arrow 'SINGLE_ARROW') or bones inside an external rig (Armature Bone, displayed as a cone 'CONE') and transfers it to a target character bone or socket.
 
-## 📦 Instalación
+🔄 Workflow
 
-1. Descarga el archivo `Retarget_to_Empties.py` desde la sección de [Releases](../../releases) o directamente desde este repositorio.
-2. Abre Blender y ve a **`Edit > Preferences > Add-ons`**.
-3. Haz clic en **`Install...`** (o *Install from Disk*) y selecciona el archivo `.py`.
-4. Activa la casilla junto a **Animation: Retarget to Empties**.
+The main panel and the prop subpanel live in the 3D Viewport sidebar: N Sidebar > Retarget.
 
----
+Setup
 
-## 📄 Licencia
+Pick your rig in the Source Armature (Required) field.
 
-Distribuido bajo la licencia MIT. Siéntete libre de usarlo, modificarlo y adaptarlo a tu pipeline de producción.
+Expand the limb and joint slots you need (use the bone picker icon to capture the active bone in Pose Mode or search by name).
+
+Part 1: Rig → Empties (Extraction and Isolation)
+
+Click Create All Empties to generate world-space proxy empties.
+
+Click Auto-Select Empties & Bake to select all proxies and open the Bake dialog (enable Visual Keying).
+
+Click Clear Empties Constraints to detach the Empties from the original rig constraints.
+
+(Important) Mute or disable the original Action Strips / Actions on the rig before starting Part 2 to avoid evaluation conflicts.
+
+Part 2: Empties → Rig (Retargeting and Cleanup)
+
+Click Empties → Rig (Apply Retarget) to link your rig controllers to the Empties.
+
+Click Select Rig & Bake (the add-on switches the rig to Pose Mode, selects the target bones, and opens the Bake dialog).
+
+Choose your cleanup step:
+
+Clean Curves and Empties: Removes temporary rig constraints, deletes Location F-Curves on joints (Chest, Head, Elbows, Knees), and deletes the Empties.
+
+Clean Setup (Empties & Constraints): Removes only the Empties and RET_ constraints created by the add-on while keeping all baked animation curves.
+
+Part 3: Torso → Root Motion
+
+Assign your character's root bone in Root Bone (make sure the Torso slot is also assigned).
+
+Click Create Root Motion Empty to create the proxy at the Root Bone position copying X and Y from the Torso with Offset.
+
+Use Select Root Empty & Bake to bake the root movement and Clear Root Constraints to release the proxy.
+
+Click Empty → Root Bone (Apply), then Select Root Bone & Bake to transfer the root motion to the rig.
+
+Finish with Clean Root Motion Setup to remove the constraint and proxy empty.
+
+Additional Module: Prop → Empties
+
+Expand the Prop → Empties subpanel to retarget weapons or external props across up to 5 slots:
+
+Configure each slot by choosing the source type (Object / Mesh or Armature Bone), the prop object/rig, and the target bone on the character (Char Bone, such as an IK Hand or Weapon Socket bone).
+
+Step 1 (Prop → Empties): Use Create All Prop Empties (or create them per slot), bake with Select Prop Empties & Bake, and release constraints with Clear Prop Empties Constraints.
+
+(Important) Mute the original prop strips/actions before moving on.
+
+Step 2 (Empties → Character): Click Prop Empties → Character, bake with Select Prop Bones & Bake, and clean up with Clean Prop Setup (preserving baked animation curves on the character).
+
+📦 Installation
+
+Download the extension .zip archive from Blender Extensions or from Releases.
+
+Open Blender and go to Edit > Preferences > Get Extensions (or Add-ons).
+
+Open the top-right menu (v) and select Install from Disk....
+
+Select the downloaded .zip file and make sure Retarget to Empties is enabled.
+
+📄 License
+
+Licensed under the MIT license (SPDX:MIT). See the LICENSE file for full details.

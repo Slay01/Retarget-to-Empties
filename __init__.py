@@ -1,13 +1,3 @@
-bl_info = {
-    "name": "Retarget to Empties",
-    "author": "Slay",
-    "version": (1, 0, 2),
-    "blender": (5, 0, 0),
-    "location": "View3D > N Sidebar > Retarget",
-    "description": "Bi-directional IK retargeting via Empties to isolate movement channels, clean curves for NLA blending, extract clean Root Motion, and retarget animated props/weapons.",
-    "category": "Animation",
-}
-
 import bpy
 from bpy.props import StringProperty, BoolProperty, EnumProperty
 from bpy.types import PropertyGroup, Panel, Operator
@@ -1567,11 +1557,13 @@ class RETARGET_OT_prop_create_empty(Operator):
         if prop_slot.target_type == 'BONE':
             pb = prop_obj.pose.bones.get(prop_slot.prop_bone_name)
             empty.location = prop_obj.matrix_world @ pb.head
+            empty.empty_display_type = 'CONE'
+            empty.empty_display_size = 0.25
         else:
             empty.location = prop_obj.matrix_world.translation
-
-        empty.empty_display_type = 'CUBE'
-        empty.empty_display_size = 0.25
+            empty.empty_display_type = 'SINGLE_ARROW'
+            empty.empty_display_size = 0.8
+        
         empty[PROP_SLOT_PROP] = self.slot
 
         prop_slot.empty_name = empty.name
@@ -1737,6 +1729,53 @@ class RETARGET_OT_prop_apply_to_char(Operator):
         self.report({'INFO'}, f"Animación de Props aplicada a {applied} hueso(s) del personaje.")
         return {'FINISHED'}
 
+class RETARGET_OT_prop_clear_char_constraints(Operator):
+    """Elimina las restricciones de retarget de props aplicadas en los huesos del personaje."""
+    bl_idname = "retarget.prop_clear_char_constraints"
+    bl_label = "Clear Prop Retarget Constraints"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+
+        prop_empty_names = {
+            emp.name for emp in _get_registered_prop_empties(context)
+        }
+
+        try:
+            _activate_armature_pose(context, armature)
+        except Exception as exc:
+            self.report({'ERROR'}, f"No se pudo activar Source Armature: {exc}")
+            return {'CANCELLED'}
+
+        cleared = 0
+        for key, _ in PROP_SLOTS_CONFIG:
+            prop_slot = _prop_slot_property(context.scene, key)
+            if not prop_slot or not prop_slot.char_bone_name:
+                continue
+
+            pose_bone = armature.pose.bones.get(prop_slot.char_bone_name)
+            if pose_bone is None:
+                continue
+
+            for constraint in list(pose_bone.constraints):
+                if (
+                    constraint.type in {'COPY_LOCATION', 'COPY_ROTATION'}
+                    and (
+                        (constraint.target is not None and constraint.target.name in prop_empty_names)
+                        or constraint.name.startswith("RET_Prop")
+                    )
+                ):
+                    pose_bone.constraints.remove(constraint)
+                    cleared += 1
+
+        self.report(
+            {'INFO'},
+            f"Eliminadas {cleared} restricciones de Prop en '{armature.name}'.",
+        )
+        return {'FINISHED'}
 
 class RETARGET_OT_prop_select_char_and_bake(Operator):
     """Selecciona en Pose Mode los huesos del personaje vinculados a Props y abre Bake."""
@@ -2167,10 +2206,26 @@ class RETARGET_PT_props_subpanel(Panel):
 
         layout.separator()
 
+        # --- CAJA INDEPENDIENTE DE RECORDATORIO (PROPS) ---
+        prop_reminder_box = layout.box()
+        col_prem = prop_reminder_box.column(align=True)
+        col_prem.scale_y = 0.8
+        col_prem.label(
+            text="Remember to mute original prop animation",
+            icon='INFO',
+        )
+        col_prem.label(
+            text="strips/actions before starting Step 2.",
+            icon='BLANK1',
+        )
+
+        layout.separator()
+
         # --- STEP 2: EMPTIES -> CHARACTER BONES ---
         p2_box = layout.box()
         p2_box.label(text="Step 2: Empties → Character", icon='BONE_DATA')
         p2_box.operator("retarget.prop_apply_to_char", icon='CON_LOCLIKE')
+        p2_box.operator("retarget.prop_clear_char_constraints", icon='X')
         p2_box.operator("retarget.prop_select_char_and_bake", icon='RENDER_ANIMATION')
 
         layout.separator()
@@ -2218,6 +2273,7 @@ classes = (
     RETARGET_OT_prop_clear_empties_constraints,
     RETARGET_OT_prop_bake_empties,
     RETARGET_OT_prop_apply_to_char,
+    RETARGET_OT_prop_clear_char_constraints,
     RETARGET_OT_prop_select_char_and_bake,
     RETARGET_OT_prop_clean_all,
     RETARGET_PT_panel,

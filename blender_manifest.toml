@@ -1,0 +1,20 @@
+schema_version = "1.0.0"
+
+id = "retarget_to_empties"
+version = "1.0.3"
+name = "Retarget to Empties"
+tagline = "IK retargeting via Empties, root motion, and prop workflow"
+maintainer = "Slay <jessandn@gmail.com>"
+type = "add-on"
+
+blender_version_min = "5.0.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+  "SPDX:MIT",
+]
+
+tags = ["Animation", "Rigging"]
+
+# Tu add-on manipula escenas/objetos localmente y no requiere red ni archivos externos:
+# permissions = []
