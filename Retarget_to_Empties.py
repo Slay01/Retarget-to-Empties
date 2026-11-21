@@ -1,20 +1,20 @@
 bl_info = {
     "name": "Retarget to Empties",
     "author": "Slay",
-    "version": (1, 0, 1),
+    "version": (1, 0, 2),
     "blender": (5, 0, 0),
     "location": "View3D > N Sidebar > Retarget",
-    "description": "Bi-directional IK retargeting via Empties to isolate movement channels, clean curves for NLA blending, and extract clean Root Motion for game engines.",
+    "description": "Bi-directional IK retargeting via Empties to isolate movement channels, clean curves for NLA blending, extract clean Root Motion, and retarget animated props/weapons.",
     "category": "Animation",
 }
 
 import bpy
-from bpy.props import StringProperty, BoolProperty
+from bpy.props import StringProperty, BoolProperty, EnumProperty
 from bpy.types import PropertyGroup, Panel, Operator
 
 
 # ──────────────────────────────────────────────
-# 1. CONFIGURACIÓN DE SLOTS
+# 1. CONFIGURACIÓN DE SLOTS (CHARACTER & PROPS)
 # ──────────────────────────────────────────────
 # True  = conserva Location + Rotation (manos, pies y torso).
 # False = elimina únicamente Location (articulaciones).
@@ -32,8 +32,17 @@ SLOTS_CONFIG = [
     ("right_knee",   "Right Knee",   False),
 ]
 
+PROP_SLOTS_CONFIG = [
+    ("prop_1", "Prop 1"),
+    ("prop_2", "Prop 2"),
+    ("prop_3", "Prop 3"),
+    ("prop_4", "Prop 4"),
+    ("prop_5", "Prop 5"),
+]
+
 OWNER_PROP = "_retarget_owner_armature"
 SLOT_PROP = "_retarget_slot"
+PROP_SLOT_PROP = "_retarget_prop_slot"
 
 
 # ──────────────────────────────────────────────
@@ -54,6 +63,49 @@ class RETargetSlot(PropertyGroup):
     expanded: BoolProperty(
         name="Expanded",
         description="Mostrar/Ocultar sección",
+        default=False,
+    )
+
+
+class RETargetPropSlot(PropertyGroup):
+    prop_label: StringProperty(
+        name="Label",
+        description="Nombre personalizado del prop (ej. Sword, Rifle, Shield)",
+        default="",
+    )
+    target_type: EnumProperty(
+        name="Source Type",
+        description="Tipo de origen animado del prop",
+        items=[
+            ('OBJECT', "Object / Mesh", "Objeto animado directamente (arma, accesorio sin rig)"),
+            ('BONE', "Armature Bone", "Hueso específico dentro de un Prop Rig"),
+        ],
+        default='OBJECT',
+    )
+    prop_object: bpy.props.PointerProperty(
+        type=bpy.types.Object,
+        name="Prop Object",
+        description="Objeto o Armature animada del prop/arma",
+    )
+    prop_bone_name: StringProperty(
+        name="Prop Bone",
+        description="Hueso del prop (si el prop es una Armature)",
+        default="",
+    )
+    char_bone_name: StringProperty(
+        name="Character Bone",
+        description="Hueso de contacto/IK del personaje al que se transferirá el movimiento (ej. Hand IK o Weapon Bone)",
+        default="",
+    )
+    empty_name: StringProperty(
+        name="Empty Name",
+        description="Empty intermediario para este prop",
+        default="",
+    )
+    created: BoolProperty(name="Created", default=False)
+    expanded: BoolProperty(
+        name="Expanded",
+        description="Mostrar/Ocultar sección del prop",
         default=False,
     )
 
@@ -81,6 +133,13 @@ def register_scene_props():
         poll=poll_armature,
     )
 
+    for key, _ in PROP_SLOTS_CONFIG:
+        setattr(
+            scene,
+            f"retarget_{key}",
+            bpy.props.PointerProperty(type=RETargetPropSlot),
+        )
+
 
 def unregister_scene_props():
     scene = bpy.types.Scene
@@ -96,9 +155,14 @@ def unregister_scene_props():
     if hasattr(scene, "retarget_armature"):
         delattr(scene, "retarget_armature")
 
+    for key, _ in PROP_SLOTS_CONFIG:
+        prop_name = f"retarget_{key}"
+        if hasattr(scene, prop_name):
+            delattr(scene, prop_name)
+
 
 # ──────────────────────────────────────────────
-# 3. FUNCIONES AUXILIARES
+# 3. FUNCIONES AUXILIARES (CHARACTER)
 # ──────────────────────────────────────────────
 def _get_armature(context):
     """Devuelve exclusivamente Source Armature. Nunca usa el objeto activo."""
@@ -268,7 +332,70 @@ def _ensure_object_mode(context):
 
 
 # ──────────────────────────────────────────────
-# 4. OPERADORES
+# 3.5. FUNCIONES AUXILIARES (PROPS)
+# ──────────────────────────────────────────────
+def _get_or_create_props_collection(context):
+    col_name = "RETARGET_Prop_Empties"
+    collection = bpy.data.collections.get(col_name)
+
+    if collection is None:
+        collection = bpy.data.collections.new(col_name)
+
+    if collection.name not in context.scene.collection.children:
+        context.scene.collection.children.link(collection)
+
+    return collection
+
+
+def _remove_props_collection_if_unused():
+    collection = bpy.data.collections.get("RETARGET_Prop_Empties")
+    if collection and not collection.objects and not collection.children:
+        bpy.data.collections.remove(collection)
+
+
+def _prop_slot_property(scene, prop_key):
+    valid_keys = {key for key, _ in PROP_SLOTS_CONFIG}
+    if prop_key not in valid_keys:
+        return None
+    return getattr(scene, f"retarget_{prop_key}", None)
+
+
+def _get_prop_slot_empty(context, prop_key):
+    prop_slot = _prop_slot_property(context.scene, prop_key)
+    if prop_slot is None or not prop_slot.empty_name:
+        return None
+
+    empty = bpy.data.objects.get(prop_slot.empty_name)
+    if empty is None or empty.type != 'EMPTY':
+        return None
+
+    if empty.get(PROP_SLOT_PROP) != prop_key:
+        return None
+
+    return empty
+
+
+def _get_registered_prop_empties(context):
+    result = []
+    seen = set()
+    for key, _ in PROP_SLOTS_CONFIG:
+        empty = _get_prop_slot_empty(context, key)
+        if empty and empty.name not in seen:
+            result.append(empty)
+            seen.add(empty.name)
+    return result
+
+
+def _remove_prop_empty_if_owned(context, prop_key):
+    empty = _get_prop_slot_empty(context, prop_key)
+    if empty is None:
+        return False
+    bpy.data.objects.remove(empty, do_unlink=True)
+    return True
+
+
+# ──────────────────────────────────────────────
+# 4. OPERADORES (CHARACTER RETARGET)
 # ──────────────────────────────────────────────
 class RETARGET_OT_pick_bone(Operator):
     bl_idname = "retarget.pick_bone"
@@ -1297,7 +1424,415 @@ class RETARGET_OT_clear_all(Operator):
 
 
 # ──────────────────────────────────────────────
-# 5. PANEL (N SIDEBAR)
+# 4.7. OPERADORES MÓDULO PROP -> EMPTIES
+# ──────────────────────────────────────────────
+class RETARGET_OT_prop_pick_char_bone(Operator):
+    """Captura el hueso seleccionado de Source Armature para el destino del Prop."""
+    bl_idname = "retarget.prop_pick_char_bone"
+    bl_label = "Pick Character Bone"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    slot: StringProperty()
+
+    def execute(self, context):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+
+        prop_slot = _prop_slot_property(context.scene, self.slot)
+        if not prop_slot:
+            return {'CANCELLED'}
+
+        selected_bone = next((pb for pb in armature.pose.bones if pb.select), None)
+        if selected_bone:
+            bone_name = selected_bone.name
+        elif armature.data.bones.active:
+            bone_name = armature.data.bones.active.name
+        else:
+            self.report({'ERROR'}, "Selecciona un hueso en Source Armature (Pose Mode).")
+            return {'CANCELLED'}
+
+        prop_slot.char_bone_name = bone_name
+        if not prop_slot.empty_name:
+            label = prop_slot.prop_label.strip() or self.slot.replace('_', ' ').title()
+            prop_slot.empty_name = f"RET_Prop_{label.replace(' ', '_')}"
+
+        self.report({'INFO'}, f"Hueso destino capturado: {bone_name}")
+        return {'FINISHED'}
+
+
+class RETARGET_OT_prop_select_char_bone(Operator):
+    """Selecciona el hueso destino del prop en el viewport."""
+    bl_idname = "retarget.prop_select_char_bone"
+    bl_label = "Select Character Bone"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    slot: StringProperty()
+
+    def execute(self, context):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+
+        prop_slot = _prop_slot_property(context.scene, self.slot)
+        if not prop_slot or not prop_slot.char_bone_name:
+            self.report({'ERROR'}, "No hay hueso destino asignado.")
+            return {'CANCELLED'}
+
+        bone = _get_bone(armature, prop_slot.char_bone_name)
+        if not bone:
+            self.report({'ERROR'}, f"Hueso '{prop_slot.char_bone_name}' no encontrado.")
+            return {'CANCELLED'}
+
+        _activate_armature_pose(context, armature)
+        for pb in armature.pose.bones:
+            pb.select = False
+        pb = armature.pose.bones.get(bone.name)
+        if pb:
+            pb.select = True
+            armature.data.bones.active = bone
+
+        return {'FINISHED'}
+
+
+class RETARGET_OT_prop_clear_slot(Operator):
+    """Limpia el slot de prop y elimina su Empty asociado."""
+    bl_idname = "retarget.prop_clear_slot"
+    bl_label = "Clear Prop Slot"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    slot: StringProperty()
+
+    def execute(self, context):
+        prop_slot = _prop_slot_property(context.scene, self.slot)
+        if not prop_slot:
+            return {'CANCELLED'}
+
+        _remove_prop_empty_if_owned(context, self.slot)
+        prop_slot.prop_label = ""
+        prop_slot.prop_object = None
+        prop_slot.prop_bone_name = ""
+        prop_slot.char_bone_name = ""
+        prop_slot.empty_name = ""
+        prop_slot.created = False
+        _remove_props_collection_if_unused()
+
+        self.report({'INFO'}, "Slot de Prop limpiado.")
+        return {'FINISHED'}
+
+
+class RETARGET_OT_prop_create_empty(Operator):
+    """Crea un Empty que sigue el movimiento/rotación del Prop (Objeto o Hueso)."""
+    bl_idname = "retarget.prop_create_empty"
+    bl_label = "Create Prop Empty"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    slot: StringProperty()
+
+    def execute(self, context):
+        prop_slot = _prop_slot_property(context.scene, self.slot)
+        if not prop_slot:
+            return {'CANCELLED'}
+
+        prop_obj = prop_slot.prop_object
+        if prop_obj is None:
+            self.report({'ERROR'}, "Asigna un Prop Object o Armature primero.")
+            return {'CANCELLED'}
+
+        if prop_slot.target_type == 'BONE':
+            if prop_obj.type != 'ARMATURE':
+                self.report({'ERROR'}, "El objeto asignado debe ser una Armature para modo Bone.")
+                return {'CANCELLED'}
+            if not prop_slot.prop_bone_name or not _get_bone(prop_obj, prop_slot.prop_bone_name):
+                self.report({'ERROR'}, "Asigna un hueso válido del Prop Rig.")
+                return {'CANCELLED'}
+
+        existing = _get_prop_slot_empty(context, self.slot)
+        if existing:
+            self.report({'WARNING'}, f"Este Prop ya tiene el Empty '{existing.name}'.")
+            return {'CANCELLED'}
+
+        label = prop_slot.prop_label.strip() or self.slot.replace('_', ' ').title()
+        base_name = prop_slot.empty_name or f"RET_Prop_{label.replace(' ', '_')}"
+        empty_name = base_name
+        suffix = 1
+        while empty_name in bpy.data.objects:
+            empty_name = f"{base_name}_{suffix:02d}"
+            suffix += 1
+
+        empty = bpy.data.objects.new(empty_name, None)
+        col = _get_or_create_props_collection(context)
+        col.objects.link(empty)
+
+        if prop_slot.target_type == 'BONE':
+            pb = prop_obj.pose.bones.get(prop_slot.prop_bone_name)
+            empty.location = prop_obj.matrix_world @ pb.head
+        else:
+            empty.location = prop_obj.matrix_world.translation
+
+        empty.empty_display_type = 'CUBE'
+        empty.empty_display_size = 0.25
+        empty[PROP_SLOT_PROP] = self.slot
+
+        prop_slot.empty_name = empty.name
+        prop_slot.created = True
+
+        cl = empty.constraints.new('COPY_LOCATION')
+        cl.name = "RET_Prop Copy Location"
+        cl.target = prop_obj
+        if prop_slot.target_type == 'BONE':
+            cl.subtarget = prop_slot.prop_bone_name
+        cl.owner_space = 'WORLD'
+        cl.target_space = 'WORLD'
+
+        cr = empty.constraints.new('COPY_ROTATION')
+        cr.name = "RET_Prop Copy Rotation"
+        cr.target = prop_obj
+        if prop_slot.target_type == 'BONE':
+            cr.subtarget = prop_slot.prop_bone_name
+        cr.owner_space = 'WORLD'
+        cr.target_space = 'WORLD'
+
+        self.report({'INFO'}, f"Prop Empty creado: '{empty.name}'.")
+        return {'FINISHED'}
+
+
+class RETARGET_OT_prop_create_all(Operator):
+    """Crea Empties para todos los Props configurados."""
+    bl_idname = "retarget.prop_create_all"
+    bl_label = "Create All Prop Empties"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        created = 0
+        for key, _ in PROP_SLOTS_CONFIG:
+            prop_slot = _prop_slot_property(context.scene, key)
+            if prop_slot and prop_slot.prop_object and not _get_prop_slot_empty(context, key):
+                res = bpy.ops.retarget.prop_create_empty(slot=key)
+                if 'FINISHED' in res:
+                    created += 1
+
+        if created == 0:
+            self.report({'WARNING'}, "No se crearon Prop Empties (revisa los slots configurados).")
+            return {'CANCELLED'}
+
+        self.report({'INFO'}, f"Creados {created} Prop Empty(s).")
+        return {'FINISHED'}
+
+
+class RETARGET_OT_prop_clear_all(Operator):
+    """Elimina todos los Prop Empties creados por el módulo de Props."""
+    bl_idname = "retarget.prop_clear_all"
+    bl_label = "Delete All Empties"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        removed = 0
+        for key, _ in PROP_SLOTS_CONFIG:
+            if _remove_prop_empty_if_owned(context, key):
+                removed += 1
+
+            prop_slot = _prop_slot_property(context.scene, key)
+            if prop_slot:
+                prop_slot.empty_name = ""
+                prop_slot.created = False
+
+        _remove_props_collection_if_unused()
+
+        self.report({'INFO'}, f"{removed} Prop Empty(s) eliminados.")
+        return {'FINISHED'}
+
+
+class RETARGET_OT_prop_clear_empties_constraints(Operator):
+    """Elimina las restricciones de los Prop Empties después de hacer Bake."""
+    bl_idname = "retarget.prop_clear_empties_constraints"
+    bl_label = "Clear Prop Empties Constraints"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        empties = _get_registered_prop_empties(context)
+        cleared = 0
+        for emp in empties:
+            if emp.constraints:
+                emp.constraints.clear()
+                cleared += 1
+
+        self.report({'INFO'}, f"Constraints eliminados en {cleared} Prop Empty(s).")
+        return {'FINISHED'}
+
+
+class RETARGET_OT_prop_bake_empties(Operator):
+    """Selecciona los Prop Empties activos y abre Bake."""
+    bl_idname = "retarget.prop_bake_empties"
+    bl_label = "Select Prop Empties & Bake"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        empties = _get_registered_prop_empties(context)
+        if not empties:
+            self.report({'WARNING'}, "No hay Prop Empties activos para hornear.")
+            return {'CANCELLED'}
+
+        _ensure_object_mode(context)
+        bpy.ops.object.select_all(action='DESELECT')
+        for emp in empties:
+            emp.select_set(True)
+        context.view_layer.objects.active = empties[0]
+
+        try:
+            bpy.ops.nla.bake('INVOKE_DEFAULT', visual_keying=True, clear_constraints=False)
+        except Exception:
+            bpy.ops.object.bake_action('INVOKE_DEFAULT')
+
+        return {'FINISHED'}
+
+
+class RETARGET_OT_prop_apply_to_char(Operator):
+    """Aplica la animación de los Prop Empties a los huesos asignados del personaje."""
+    bl_idname = "retarget.prop_apply_to_char"
+    bl_label = "Prop Empties → Character Bones"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+
+        pairs = []
+        for key, _ in PROP_SLOTS_CONFIG:
+            prop_slot = _prop_slot_property(context.scene, key)
+            if not prop_slot or not prop_slot.char_bone_name:
+                continue
+            empty = _get_prop_slot_empty(context, key)
+            pose_bone = armature.pose.bones.get(prop_slot.char_bone_name)
+            if empty and pose_bone:
+                pairs.append((pose_bone, empty))
+
+        if not pairs:
+            self.report({'WARNING'}, "No hay pares válidos (Prop Empty + Hueso de Personaje).")
+            return {'CANCELLED'}
+
+        _activate_armature_pose(context, armature)
+
+        applied = 0
+        for pose_bone, empty in pairs:
+            for c in list(pose_bone.constraints):
+                if c.type in {'COPY_LOCATION', 'COPY_ROTATION'} and c.target == empty:
+                    pose_bone.constraints.remove(c)
+
+            cl = pose_bone.constraints.new('COPY_LOCATION')
+            cl.name = "RET_Prop Copy Location"
+            cl.target = empty
+            cl.owner_space = 'WORLD'
+            cl.target_space = 'WORLD'
+
+            cr = pose_bone.constraints.new('COPY_ROTATION')
+            cr.name = "RET_Prop Copy Rotation"
+            cr.target = empty
+            cr.owner_space = 'WORLD'
+            cr.target_space = 'WORLD'
+
+            applied += 1
+
+        self.report({'INFO'}, f"Animación de Props aplicada a {applied} hueso(s) del personaje.")
+        return {'FINISHED'}
+
+
+class RETARGET_OT_prop_select_char_and_bake(Operator):
+    """Selecciona en Pose Mode los huesos del personaje vinculados a Props y abre Bake."""
+    bl_idname = "retarget.prop_select_char_and_bake"
+    bl_label = "Select Prop Bones & Bake"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+
+        _activate_armature_pose(context, armature)
+        for pb in armature.pose.bones:
+            pb.select = False
+
+        selected = 0
+        last_bone = None
+        for key, _ in PROP_SLOTS_CONFIG:
+            prop_slot = _prop_slot_property(context.scene, key)
+            if not prop_slot or not prop_slot.char_bone_name:
+                continue
+            empty = _get_prop_slot_empty(context, key)
+            if not empty:
+                continue
+            pb = armature.pose.bones.get(prop_slot.char_bone_name)
+            b_data = armature.data.bones.get(prop_slot.char_bone_name)
+            if pb and b_data:
+                pb.select = True
+                last_bone = b_data
+                selected += 1
+
+        if last_bone:
+            armature.data.bones.active = last_bone
+
+        if selected == 0:
+            self.report({'WARNING'}, "No se encontraron huesos del personaje vinculados a Prop Empties.")
+            return {'CANCELLED'}
+
+        try:
+            bpy.ops.nla.bake('INVOKE_DEFAULT', visual_keying=True, clear_constraints=False)
+        except Exception:
+            bpy.ops.object.bake_action('INVOKE_DEFAULT')
+
+        return {'FINISHED'}
+
+
+class RETARGET_OT_prop_clean_all(Operator):
+    """Limpia constraints de props en el personaje y borra los Prop Empties (conserva curvas)."""
+    bl_idname = "retarget.prop_clean_all"
+    bl_label = "Clean Prop Setup"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        armature = _get_armature(context)
+        prop_empties = _get_registered_prop_empties(context)
+        prop_empty_names = {e.name for e in prop_empties}
+
+        constraints_removed = 0
+        if armature:
+            try:
+                _activate_armature_pose(context, armature)
+                for pb in armature.pose.bones:
+                    for c in list(pb.constraints):
+                        if (
+                            c.type in {'COPY_LOCATION', 'COPY_ROTATION'}
+                            and (
+                                (c.target is not None and c.target.name in prop_empty_names)
+                                or c.name.startswith("RET_Prop")
+                            )
+                        ):
+                            pb.constraints.remove(c)
+                            constraints_removed += 1
+            except Exception:
+                pass
+
+        empties_removed = 0
+        for key, _ in PROP_SLOTS_CONFIG:
+            if _remove_prop_empty_if_owned(context, key):
+                empties_removed += 1
+            prop_slot = _prop_slot_property(context.scene, key)
+            if prop_slot:
+                prop_slot.empty_name = ""
+                prop_slot.created = False
+
+        _remove_props_collection_if_unused()
+
+        self.report(
+            {'INFO'},
+            f"Prop Setup limpiado: {constraints_removed} constraints y {empties_removed} Prop Empties eliminados.",
+        )
+        return {'FINISHED'}
+
+
+# ──────────────────────────────────────────────
+# 5. PANELES (N SIDEBAR - MISMA PESTAÑA RETARGET)
 # ──────────────────────────────────────────────
 class RETARGET_PT_panel(Panel):
     bl_label = "Retarget → Empties"
@@ -1534,11 +2069,127 @@ class RETARGET_PT_panel(Panel):
         )
 
 
+class RETARGET_PT_props_subpanel(Panel):
+    bl_label = "Prop → Empties"
+    bl_idname = "RETARGET_PT_props_subpanel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = "Retarget"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        armature = _get_armature(context)
+
+        # 5 Slots Independientes para Props / Armas / Accesorios
+        for key, default_label in PROP_SLOTS_CONFIG:
+            prop_slot = _prop_slot_property(scene, key)
+            box = layout.box()
+
+            display_title = (
+                f"{default_label}: {prop_slot.prop_label}"
+                if prop_slot.prop_label.strip()
+                else default_label
+            )
+
+            row_head = box.row(align=True)
+            icon_tri = 'TRIA_DOWN' if prop_slot.expanded else 'TRIA_RIGHT'
+            row_head.prop(
+                prop_slot,
+                "expanded",
+                text=display_title,
+                icon=icon_tri,
+                emboss=False,
+            )
+
+            valid_empty = _get_prop_slot_empty(context, key)
+            if valid_empty:
+                row_head.label(text="", icon='CHECKMARK')
+
+            clr_op = row_head.operator("retarget.prop_clear_slot", icon='X', text="")
+            clr_op.slot = key
+
+            if prop_slot.expanded:
+                box.prop(prop_slot, "prop_label", text="Name")
+                box.prop(prop_slot, "target_type", text="Source")
+                box.prop(prop_slot, "prop_object", text="Prop Obj")
+
+                if prop_slot.target_type == 'BONE':
+                    if prop_slot.prop_object and prop_slot.prop_object.type == 'ARMATURE':
+                        box.prop_search(
+                            prop_slot,
+                            "prop_bone_name",
+                            prop_slot.prop_object.data,
+                            "bones",
+                            text="Prop Bone",
+                        )
+                    else:
+                        box.prop(prop_slot, "prop_bone_name", text="Prop Bone")
+
+                box.separator()
+
+                # Hueso destino en el personaje (ej. Hand IK o Weapon Socket Bone)
+                row_cbone = box.row(align=True)
+                if armature and armature.data:
+                    row_cbone.prop_search(
+                        prop_slot,
+                        "char_bone_name",
+                        armature.data,
+                        "bones",
+                        text="Char Bone",
+                    )
+                else:
+                    row_cbone.prop(prop_slot, "char_bone_name", text="Char Bone")
+
+                pick_op = row_cbone.operator("retarget.prop_pick_char_bone", icon='BONE_DATA', text="")
+                pick_op.slot = key
+
+                sel_op = row_cbone.operator("retarget.prop_select_char_bone", icon='ZOOM_ALL', text="")
+                sel_op.slot = key
+
+                box.prop(prop_slot, "empty_name", text="Empty")
+
+                row_create = box.row()
+                c_op = row_create.operator("retarget.prop_create_empty", text="Create Prop Empty", icon='CUBE')
+                c_op.slot = key
+
+        layout.separator()
+
+        # --- STEP 1: PROP -> EMPTIES ---
+        p1_box = layout.box()
+        p1_box.label(text="Step 1: Prop → Empties", icon='OUTLINER_OB_EMPTY')
+        row_p_btns = p1_box.row(align=True)
+        row_p_btns.operator("retarget.prop_create_all", icon='ADD')
+        row_p_btns.operator("retarget.prop_clear_all", icon='REMOVE')
+        p1_box.operator("retarget.prop_clear_empties_constraints", icon='CONSTRAINT_BONE')
+        p1_box.operator("retarget.prop_bake_empties", icon='RENDER_ANIMATION')
+
+        layout.separator()
+
+        # --- STEP 2: EMPTIES -> CHARACTER BONES ---
+        p2_box = layout.box()
+        p2_box.label(text="Step 2: Empties → Character", icon='BONE_DATA')
+        p2_box.operator("retarget.prop_apply_to_char", icon='CON_LOCLIKE')
+        p2_box.operator("retarget.prop_select_char_and_bake", icon='RENDER_ANIMATION')
+
+        layout.separator()
+
+        # --- LIMPIEZA FINAL PROPS ---
+        clean_p_box = layout.box()
+        clean_p_box.operator("retarget.prop_clean_all", icon='TRASH')
+        info_p = clean_p_box.column(align=True)
+        info_p.scale_y = 0.8
+        info_p.label(text="Removes Prop Empties & RET_Prop constraints.", icon='INFO')
+        info_p.label(text="Preserves baked animation curves.", icon='BLANK1')
+
+
 # ──────────────────────────────────────────────
 # 6. REGISTRO
 # ──────────────────────────────────────────────
 classes = (
     RETargetSlot,
+    RETargetPropSlot,
     RETARGET_OT_pick_bone,
     RETARGET_OT_select_bone_in_viewport,
     RETARGET_OT_clear_slot,
@@ -1558,7 +2209,19 @@ classes = (
     RETARGET_OT_clean_curves_and_empties,
     RETARGET_OT_clean_all_setup,
     RETARGET_OT_clear_all,
+    RETARGET_OT_prop_pick_char_bone,
+    RETARGET_OT_prop_select_char_bone,
+    RETARGET_OT_prop_clear_slot,
+    RETARGET_OT_prop_create_empty,
+    RETARGET_OT_prop_create_all,
+    RETARGET_OT_prop_clear_all,
+    RETARGET_OT_prop_clear_empties_constraints,
+    RETARGET_OT_prop_bake_empties,
+    RETARGET_OT_prop_apply_to_char,
+    RETARGET_OT_prop_select_char_and_bake,
+    RETARGET_OT_prop_clean_all,
     RETARGET_PT_panel,
+    RETARGET_PT_props_subpanel,
 )
 
 
