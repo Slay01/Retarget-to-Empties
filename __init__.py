@@ -155,10 +155,43 @@ def register_scene_props():
 
     scene.retarget_root_bone = bpy.props.PointerProperty(type=RETargetSlot)
 
+    # Desplegables maestros de listas (abiertos por defecto)
     scene.retarget_slots_expanded = BoolProperty(
         name="Bone Slots",
         description="Mostrar/Ocultar lista de slots de huesos",
         default=True,
+    )
+    scene.retarget_prop_slots_expanded = BoolProperty(
+        name="Prop Slots",
+        description="Mostrar/Ocultar lista de slots de props",
+        default=True,
+    )
+
+    # Desplegables de etapas/secciones (cerrados por defecto)
+    scene.retarget_part1_expanded = BoolProperty(
+        name="Part 1: Rig → Empties",
+        description="Mostrar/Ocultar Part 1",
+        default=False,
+    )
+    scene.retarget_part2_expanded = BoolProperty(
+        name="Part 2: Empties → Rig",
+        description="Mostrar/Ocultar Part 2",
+        default=False,
+    )
+    scene.retarget_part3_expanded = BoolProperty(
+        name="Part 3: Torso → Root Motion",
+        description="Mostrar/Ocultar Part 3",
+        default=False,
+    )
+    scene.retarget_prop_step1_expanded = BoolProperty(
+        name="Step 1: Prop → Empties",
+        description="Mostrar/Ocultar Step 1 de Props",
+        default=False,
+    )
+    scene.retarget_prop_step2_expanded = BoolProperty(
+        name="Step 2: Empties → Prop",
+        description="Mostrar/Ocultar Step 2 de Props",
+        default=False,
     )
 
     scene.retarget_armature = bpy.props.PointerProperty(
@@ -184,14 +217,20 @@ def unregister_scene_props():
         if hasattr(scene, prop_name):
             delattr(scene, prop_name)
 
-    if hasattr(scene, "retarget_root_bone"):
-        delattr(scene, "retarget_root_bone")
-
-    if hasattr(scene, "retarget_slots_expanded"):
-        delattr(scene, "retarget_slots_expanded")
-
-    if hasattr(scene, "retarget_armature"):
-        delattr(scene, "retarget_armature")
+    extra_props = (
+        "retarget_root_bone",
+        "retarget_slots_expanded",
+        "retarget_prop_slots_expanded",
+        "retarget_part1_expanded",
+        "retarget_part2_expanded",
+        "retarget_part3_expanded",
+        "retarget_prop_step1_expanded",
+        "retarget_prop_step2_expanded",
+        "retarget_armature",
+    )
+    for prop_name in extra_props:
+        if hasattr(scene, prop_name):
+            delattr(scene, prop_name)
 
     for key, _ in PROP_SLOTS_CONFIG:
         prop_name = f"retarget_{key}"
@@ -2140,6 +2179,7 @@ class RETARGET_PT_panel(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Retarget"
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
@@ -2159,7 +2199,7 @@ class RETARGET_PT_panel(Panel):
 
         layout.separator()
 
-        # --- DESPLEGABLE GLOBAL DE BONE SLOTS + SYMMETRIZE ---
+        # --- DESPLEGABLE MAESTRO DE BONE SLOTS + SYMMETRIZE ---
         slots_container = layout.box()
         slots_header = slots_container.row(align=True)
         slots_tri = 'TRIA_DOWN' if scene.retarget_slots_expanded else 'TRIA_RIGHT'
@@ -2260,21 +2300,29 @@ class RETARGET_PT_panel(Panel):
 
         # --- PART 1: RIG -> EMPTIES ---
         part_one = layout.box()
-        part_one.label(
+        p1_head = part_one.row(align=True)
+        p1_tri = 'TRIA_DOWN' if scene.retarget_part1_expanded else 'TRIA_RIGHT'
+        p1_head.prop(
+            scene,
+            "retarget_part1_expanded",
             text="Part 1: Rig → Empties",
-            icon='OUTLINER_OB_EMPTY',
+            icon=p1_tri,
+            emboss=False,
         )
-        row = part_one.row(align=True)
-        row.operator("retarget.create_all", icon='ADD')
-        row.operator("retarget.clear_all", icon='REMOVE')
-        part_one.operator(
-            "retarget.clear_constraints_empties",
-            icon='CONSTRAINT_BONE',
-        )
-        part_one.operator(
-            "retarget.select_and_open_bake",
-            icon='RENDER_ANIMATION',
-        )
+        p1_head.label(text="", icon='OUTLINER_OB_EMPTY')
+
+        if scene.retarget_part1_expanded:
+            row = part_one.row(align=True)
+            row.operator("retarget.create_all", icon='ADD')
+            row.operator("retarget.clear_all", icon='REMOVE')
+            part_one.operator(
+                "retarget.clear_constraints_empties",
+                icon='CONSTRAINT_BONE',
+            )
+            part_one.operator(
+                "retarget.select_and_open_bake",
+                icon='RENDER_ANIMATION',
+            )
 
         layout.separator()
 
@@ -2294,108 +2342,123 @@ class RETARGET_PT_panel(Panel):
 
         # --- PART 2: EMPTIES -> RIG ---
         part_two = layout.box()
-        part_two.label(
+        p2_head = part_two.row(align=True)
+        p2_tri = 'TRIA_DOWN' if scene.retarget_part2_expanded else 'TRIA_RIGHT'
+        p2_head.prop(
+            scene,
+            "retarget_part2_expanded",
             text="Part 2: Empties → Rig",
-            icon='ARMATURE_DATA',
+            icon=p2_tri,
+            emboss=False,
         )
-        part_two.operator(
-            "retarget.apply_to_rig",
-            icon='CON_LOCLIKE',
-        )
-        part_two.operator(
-            "retarget.clear_rig_constraints",
-            icon='X',
-        )
-        part_two.operator(
-            "retarget.select_rig_and_open_bake",
-            icon='RENDER_ANIMATION',
-        )
+        p2_head.label(text="", icon='ARMATURE_DATA')
 
-        part_two.separator()
-        part_two.operator(
-            "retarget.clean_curves_and_empties",
-            icon='TRASH',
-        )
-        warn_col = part_two.column(align=True)
-        warn_col.scale_y = 0.8
-        warn_col.label(
-            text="Warning: Location curves of joints",
-            icon='ERROR',
-        )
-        warn_col.label(
-            text="(Chest, Head, Elbows, Knees) will be deleted.",
-            icon='BLANK1',
-        )
+        if scene.retarget_part2_expanded:
+            part_two.operator(
+                "retarget.apply_to_rig",
+                icon='CON_LOCLIKE',
+            )
+            part_two.operator(
+                "retarget.clear_rig_constraints",
+                icon='X',
+            )
+            part_two.operator(
+                "retarget.select_rig_and_open_bake",
+                icon='RENDER_ANIMATION',
+            )
+
+            part_two.separator()
+            part_two.operator(
+                "retarget.clean_curves_and_empties",
+                icon='TRASH',
+            )
+            warn_col = part_two.column(align=True)
+            warn_col.scale_y = 0.8
+            warn_col.label(
+                text="Warning: Location curves of joints",
+                icon='ERROR',
+            )
+            warn_col.label(
+                text="(Chest, Head, Elbows, Knees) will be deleted.",
+                icon='BLANK1',
+            )
 
         layout.separator()
 
         # --- PART 3: TORSO -> ROOT MOTION ---
         part_three = layout.box()
-        part_three.label(
+        p3_head = part_three.row(align=True)
+        p3_tri = 'TRIA_DOWN' if scene.retarget_part3_expanded else 'TRIA_RIGHT'
+        p3_head.prop(
+            scene,
+            "retarget_part3_expanded",
             text="Part 3: Torso → Root Motion",
-            icon='ORIENTATION_GLOBAL',
+            icon=p3_tri,
+            emboss=False,
         )
+        p3_head.label(text="", icon='ORIENTATION_GLOBAL')
 
-        root_slot = _slot_property(scene, "root_bone")
-        row_root = part_three.row(align=True)
-        if armature and armature.data:
-            row_root.prop_search(
-                root_slot,
-                "bone_name",
-                armature.data,
-                "bones",
-                text="Root Bone",
+        if scene.retarget_part3_expanded:
+            root_slot = _slot_property(scene, "root_bone")
+            row_root = part_three.row(align=True)
+            if armature and armature.data:
+                row_root.prop_search(
+                    root_slot,
+                    "bone_name",
+                    armature.data,
+                    "bones",
+                    text="Root Bone",
+                )
+            else:
+                row_root.prop(root_slot, "bone_name", text="Root Bone")
+
+            pick_root = row_root.operator("retarget.pick_bone", icon='BONE_DATA', text="")
+            pick_root.slot = "root_bone"
+
+            sel_root = row_root.operator("retarget.select_bone_in_viewport", icon='ZOOM_ALL', text="")
+            sel_root.slot = "root_bone"
+
+            clr_root = row_root.operator("retarget.clear_slot", icon='X', text="")
+            clr_root.slot = "root_bone"
+
+            row_rm_create = part_three.row(align=True)
+            row_rm_create.operator("retarget.create_root_empty", icon='EMPTY_ARROWS')
+            valid_root_empty = (
+                _get_slot_empty(
+                    context,
+                    armature,
+                    "root_bone",
+                    adopt_legacy=False,
+                    allow_cross_armature=True,
+                )
+                if armature else None
             )
-        else:
-            row_root.prop(root_slot, "bone_name", text="Root Bone")
-
-        pick_root = row_root.operator("retarget.pick_bone", icon='BONE_DATA', text="")
-        pick_root.slot = "root_bone"
-
-        sel_root = row_root.operator("retarget.select_bone_in_viewport", icon='ZOOM_ALL', text="")
-        sel_root.slot = "root_bone"
-
-        clr_root = row_root.operator("retarget.clear_slot", icon='X', text="")
-        clr_root.slot = "root_bone"
-
-        row_rm_create = part_three.row(align=True)
-        row_rm_create.operator("retarget.create_root_empty", icon='EMPTY_ARROWS')
-        valid_root_empty = (
-            _get_slot_empty(
-                context,
-                armature,
-                "root_bone",
-                adopt_legacy=False,
-                allow_cross_armature=True,
+            row_rm_create.label(
+                text="",
+                icon='CHECKMARK' if valid_root_empty else 'BLANK1',
             )
-            if armature else None
-        )
-        row_rm_create.label(
-            text="",
-            icon='CHECKMARK' if valid_root_empty else 'BLANK1',
-        )
 
-        part_three.operator(
-            "retarget.clear_root_constraints",
-            icon='CONSTRAINT_BONE',
-        )
-        part_three.operator("retarget.bake_root_empty", icon='RENDER_ANIMATION')
+            part_three.operator(
+                "retarget.clear_root_constraints",
+                icon='CONSTRAINT_BONE',
+            )
+            part_three.operator("retarget.bake_root_empty", icon='RENDER_ANIMATION')
 
-        part_three.separator()
-        rm_step_col = part_three.column(align=True)
-        rm_step_col.scale_y = 0.8
-        rm_step_col.label(
-            text="Step 2 of 2: Clear Root Constraints",
-            icon='INFO',
-        )
-        rm_step_col.label(
-            text="before applying to Root Bone.",
-            icon='BLANK1',
-        )
+            part_three.separator()
+            rm_step_col = part_three.column(align=True)
+            rm_step_col.scale_y = 0.8
+            rm_step_col.label(
+                text="Step 2 of 2: Clear Root Constraints",
+                icon='INFO',
+            )
+            rm_step_col.label(
+                text="before applying to Root Bone.",
+                icon='BLANK1',
+            )
 
-        part_three.operator("retarget.apply_root_to_bone", icon='CON_LOCLIKE')
-        part_three.operator("retarget.select_root_and_bake", icon='BONE_DATA')
-        part_three.operator("retarget.clean_root_motion", icon='TRASH')
+            part_three.operator("retarget.apply_root_to_bone", icon='CON_LOCLIKE')
+            part_three.operator("retarget.select_root_and_bake", icon='BONE_DATA')
+            part_three.operator("retarget.clean_root_motion", icon='TRASH')
 
         layout.separator()
 
@@ -2428,100 +2491,127 @@ class RETARGET_PT_props_subpanel(Panel):
         layout = self.layout
         scene = context.scene
 
-        for key, default_label in PROP_SLOTS_CONFIG:
-            prop_slot = _prop_slot_property(scene, key)
-            box = layout.box()
+        # --- DESPLEGABLE MAESTRO DE PROP SLOTS (ABIERTO POR DEFECTO) ---
+        props_container = layout.box()
+        props_header = props_container.row(align=True)
+        props_tri = 'TRIA_DOWN' if scene.retarget_prop_slots_expanded else 'TRIA_RIGHT'
+        assigned_props = sum(
+            1 for key, _ in PROP_SLOTS_CONFIG if _prop_slot_property(scene, key).prop_object is not None
+        )
+        props_header.prop(
+            scene,
+            "retarget_prop_slots_expanded",
+            text=f"Prop Slots ({assigned_props}/{len(PROP_SLOTS_CONFIG)})",
+            icon=props_tri,
+            emboss=False,
+        )
 
-            display_title = (
-                f"{default_label}: {prop_slot.prop_label}"
-                if prop_slot.prop_label.strip()
-                else default_label
-            )
+        if scene.retarget_prop_slots_expanded:
+            for key, default_label in PROP_SLOTS_CONFIG:
+                prop_slot = _prop_slot_property(scene, key)
+                box = props_container.box()
 
-            row_head = box.row(align=True)
-            icon_tri = 'TRIA_DOWN' if prop_slot.expanded else 'TRIA_RIGHT'
-            row_head.prop(
-                prop_slot,
-                "expanded",
-                text=display_title,
-                icon=icon_tri,
-                emboss=False,
-            )
+                display_title = (
+                    f"{default_label}: {prop_slot.prop_label}"
+                    if prop_slot.prop_label.strip()
+                    else default_label
+                )
 
-            valid_empty = _get_prop_slot_empty(context, key)
-            if valid_empty:
-                row_head.label(text="", icon='CHECKMARK')
+                row_head = box.row(align=True)
+                icon_tri = 'TRIA_DOWN' if prop_slot.expanded else 'TRIA_RIGHT'
+                row_head.prop(
+                    prop_slot,
+                    "expanded",
+                    text=display_title,
+                    icon=icon_tri,
+                    emboss=False,
+                )
 
-            clr_op = row_head.operator("retarget.prop_clear_slot", icon='X', text="")
-            clr_op.slot = key
+                valid_empty = _get_prop_slot_empty(context, key)
+                if valid_empty:
+                    row_head.label(text="", icon='CHECKMARK')
 
-            if prop_slot.expanded:
-                box.prop(prop_slot, "prop_label", text="Name")
+                clr_op = row_head.operator("retarget.prop_clear_slot", icon='X', text="")
+                clr_op.slot = key
 
-                # --- ORIGEN (SOURCE) ---
-                box.prop(prop_slot, "source_type", text="Source")
-                box.prop(prop_slot, "prop_object", text="Prop Obj")
+                if prop_slot.expanded:
+                    box.prop(prop_slot, "prop_label", text="Name")
 
-                if prop_slot.source_type == 'BONE':
-                    row_pbone = box.row(align=True)
-                    if prop_slot.prop_object and prop_slot.prop_object.type == 'ARMATURE':
-                        row_pbone.prop_search(
-                            prop_slot,
-                            "prop_bone_name",
-                            prop_slot.prop_object.data,
-                            "bones",
-                            text="Prop Bone",
-                        )
-                    else:
-                        row_pbone.prop(prop_slot, "prop_bone_name", text="Prop Bone")
+                    # --- ORIGEN (SOURCE) ---
+                    box.prop(prop_slot, "source_type", text="Source")
+                    box.prop(prop_slot, "prop_object", text="Prop Obj")
 
-                    pick_src_op = row_pbone.operator("retarget.prop_pick_source_bone", icon='BONE_DATA', text="")
-                    pick_src_op.slot = key
+                    if prop_slot.source_type == 'BONE':
+                        row_pbone = box.row(align=True)
+                        if prop_slot.prop_object and prop_slot.prop_object.type == 'ARMATURE':
+                            row_pbone.prop_search(
+                                prop_slot,
+                                "prop_bone_name",
+                                prop_slot.prop_object.data,
+                                "bones",
+                                text="Prop Bone",
+                            )
+                        else:
+                            row_pbone.prop(prop_slot, "prop_bone_name", text="Prop Bone")
 
-                    sel_src_op = row_pbone.operator("retarget.prop_select_source_bone", icon='ZOOM_ALL', text="")
-                    sel_src_op.slot = key
+                        pick_src_op = row_pbone.operator("retarget.prop_pick_source_bone", icon='BONE_DATA', text="")
+                        pick_src_op.slot = key
 
-                box.prop(prop_slot, "empty_name", text="Empty")
+                        sel_src_op = row_pbone.operator("retarget.prop_select_source_bone", icon='ZOOM_ALL', text="")
+                        sel_src_op.slot = key
 
-                row_create = box.row()
-                c_op = row_create.operator("retarget.prop_create_empty", text="Create Prop Empty", icon='CUBE')
-                c_op.slot = key
+                    box.prop(prop_slot, "empty_name", text="Empty")
 
-                box.separator()
+                    row_create = box.row()
+                    c_op = row_create.operator("retarget.prop_create_empty", text="Create Prop Empty", icon='CUBE')
+                    c_op.slot = key
 
-                # --- DESTINO (TARGET PARA STEP 2) ---
-                box.prop(prop_slot, "target_type", text="Target")
-                box.prop(prop_slot, "target_object", text="Target Obj")
+                    box.separator()
 
-                if prop_slot.target_type == 'BONE':
-                    row_tbone = box.row(align=True)
-                    if prop_slot.target_object and prop_slot.target_object.type == 'ARMATURE':
-                        row_tbone.prop_search(
-                            prop_slot,
-                            "target_bone_name",
-                            prop_slot.target_object.data,
-                            "bones",
-                            text="Target Bone",
-                        )
-                    else:
-                        row_tbone.prop(prop_slot, "target_bone_name", text="Target Bone")
+                    # --- DESTINO (TARGET PARA STEP 2) ---
+                    box.prop(prop_slot, "target_type", text="Target")
+                    box.prop(prop_slot, "target_object", text="Target Obj")
 
-                    pick_tgt_op = row_tbone.operator("retarget.prop_pick_target_bone", icon='BONE_DATA', text="")
-                    pick_tgt_op.slot = key
+                    if prop_slot.target_type == 'BONE':
+                        row_tbone = box.row(align=True)
+                        if prop_slot.target_object and prop_slot.target_object.type == 'ARMATURE':
+                            row_tbone.prop_search(
+                                prop_slot,
+                                "target_bone_name",
+                                prop_slot.target_object.data,
+                                "bones",
+                                text="Target Bone",
+                            )
+                        else:
+                            row_tbone.prop(prop_slot, "target_bone_name", text="Target Bone")
 
-                    sel_tgt_op = row_tbone.operator("retarget.prop_select_target_bone", icon='ZOOM_ALL', text="")
-                    sel_tgt_op.slot = key
+                        pick_tgt_op = row_tbone.operator("retarget.prop_pick_target_bone", icon='BONE_DATA', text="")
+                        pick_tgt_op.slot = key
+
+                        sel_tgt_op = row_tbone.operator("retarget.prop_select_target_bone", icon='ZOOM_ALL', text="")
+                        sel_tgt_op.slot = key
 
         layout.separator()
 
-        # --- STEP 1: PROP -> EMPTIES ---
+        # --- STEP 1: PROP -> EMPTIES (DESPLEGABLE, CERRADO POR DEFECTO) ---
         p1_box = layout.box()
-        p1_box.label(text="Step 1: Prop → Empties", icon='OUTLINER_OB_EMPTY')
-        row_p_btns = p1_box.row(align=True)
-        row_p_btns.operator("retarget.prop_create_all", icon='ADD')
-        row_p_btns.operator("retarget.prop_clear_all", icon='REMOVE')
-        p1_box.operator("retarget.prop_clear_empties_constraints", icon='CONSTRAINT_BONE')
-        p1_box.operator("retarget.prop_bake_empties", icon='RENDER_ANIMATION')
+        ps1_head = p1_box.row(align=True)
+        ps1_tri = 'TRIA_DOWN' if scene.retarget_prop_step1_expanded else 'TRIA_RIGHT'
+        ps1_head.prop(
+            scene,
+            "retarget_prop_step1_expanded",
+            text="Step 1: Prop → Empties",
+            icon=ps1_tri,
+            emboss=False,
+        )
+        ps1_head.label(text="", icon='OUTLINER_OB_EMPTY')
+
+        if scene.retarget_prop_step1_expanded:
+            row_p_btns = p1_box.row(align=True)
+            row_p_btns.operator("retarget.prop_create_all", icon='ADD')
+            row_p_btns.operator("retarget.prop_clear_all", icon='REMOVE')
+            p1_box.operator("retarget.prop_clear_empties_constraints", icon='CONSTRAINT_BONE')
+            p1_box.operator("retarget.prop_bake_empties", icon='RENDER_ANIMATION')
 
         layout.separator()
 
@@ -2540,12 +2630,23 @@ class RETARGET_PT_props_subpanel(Panel):
 
         layout.separator()
 
-        # --- STEP 2: EMPTIES -> PROP / TARGET ---
+        # --- STEP 2: EMPTIES -> PROP / TARGET (DESPLEGABLE, CERRADO POR DEFECTO) ---
         p2_box = layout.box()
-        p2_box.label(text="Step 2: Empties → Prop", icon='ARMATURE_DATA')
-        p2_box.operator("retarget.prop_apply_to_target", icon='CON_LOCLIKE')
-        p2_box.operator("retarget.prop_clear_target_constraints", icon='X')
-        p2_box.operator("retarget.prop_select_target_and_bake", icon='RENDER_ANIMATION')
+        ps2_head = p2_box.row(align=True)
+        ps2_tri = 'TRIA_DOWN' if scene.retarget_prop_step2_expanded else 'TRIA_RIGHT'
+        ps2_head.prop(
+            scene,
+            "retarget_prop_step2_expanded",
+            text="Step 2: Empties → Prop",
+            icon=ps2_tri,
+            emboss=False,
+        )
+        ps2_head.label(text="", icon='ARMATURE_DATA')
+
+        if scene.retarget_prop_step2_expanded:
+            p2_box.operator("retarget.prop_apply_to_target", icon='CON_LOCLIKE')
+            p2_box.operator("retarget.prop_clear_target_constraints", icon='X')
+            p2_box.operator("retarget.prop_select_target_and_bake", icon='RENDER_ANIMATION')
 
         layout.separator()
 
