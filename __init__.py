@@ -22,6 +22,13 @@ SLOTS_CONFIG = [
     ("right_knee",   "Right Knee",   False),
 ]
 
+SYMMETRY_PAIRS = [
+    ("left_hand",  "right_hand"),
+    ("left_foot",  "right_foot"),
+    ("left_elbow", "right_elbow"),
+    ("left_knee",  "right_knee"),
+]
+
 PROP_SLOTS_CONFIG = [
     ("prop_1", "Prop 1"),
     ("prop_2", "Prop 2"),
@@ -148,6 +155,12 @@ def register_scene_props():
 
     scene.retarget_root_bone = bpy.props.PointerProperty(type=RETargetSlot)
 
+    scene.retarget_slots_expanded = BoolProperty(
+        name="Bone Slots",
+        description="Mostrar/Ocultar lista de slots de huesos",
+        default=True,
+    )
+
     scene.retarget_armature = bpy.props.PointerProperty(
         type=bpy.types.Object,
         name="Source Armature",
@@ -173,6 +186,9 @@ def unregister_scene_props():
 
     if hasattr(scene, "retarget_root_bone"):
         delattr(scene, "retarget_root_bone")
+
+    if hasattr(scene, "retarget_slots_expanded"):
+        delattr(scene, "retarget_slots_expanded")
 
     if hasattr(scene, "retarget_armature"):
         delattr(scene, "retarget_armature")
@@ -224,6 +240,46 @@ def _get_bone(armature, bone_name):
     return None
 
 
+def _find_symmetric_bone_name(armature, bone_name):
+    """Busca el nombre simétrico de un hueso usando Blender flip_name y convenciones comunes."""
+    if not armature or not armature.data or not bone_name:
+        return None
+
+    candidates = []
+
+    try:
+        flipped = bpy.utils.flip_name(bone_name)
+        if flipped and flipped != bone_name:
+            candidates.append(flipped)
+    except Exception:
+        pass
+
+    replacements = [
+        (".L", ".R"), (".R", ".L"),
+        ("_L", "_R"), ("_R", "_L"),
+        (".l", ".r"), (".r", ".l"),
+        ("_l", "_r"), ("_r", "_l"),
+        ("-L", "-R"), ("-R", "-L"),
+        ("-l", "-r"), ("-r", "-l"),
+        ("Left", "Right"), ("Right", "Left"),
+        ("LEFT", "RIGHT"), ("RIGHT", "LEFT"),
+        ("left", "right"), ("right", "left"),
+    ]
+
+    for old, new in replacements:
+        if old in bone_name:
+            cand = bone_name.replace(old, new)
+            if cand != bone_name and cand not in candidates:
+                candidates.append(cand)
+
+    for cand in candidates:
+        bone = _get_bone(armature, cand)
+        if bone and bone.name != bone_name:
+            return bone.name
+
+    return None
+
+
 def _activate_armature_pose(context, armature):
     """Activa la armature designada y la coloca en Pose Mode."""
     if context.object and context.object.mode != 'OBJECT':
@@ -261,7 +317,7 @@ def _slot_property(scene, slot_key):
     return getattr(scene, f"retarget_{slot_key}")
 
 
-def _get_slot_empty(context, armature, slot_key, adopt_legacy=False):
+def _get_slot_empty(context, armature, slot_key, adopt_legacy=False, allow_cross_armature=False):
     slot_prop = _slot_property(context.scene, slot_key)
     if slot_prop is None or not slot_prop.empty_name:
         return None
@@ -274,9 +330,11 @@ def _get_slot_empty(context, armature, slot_key, adopt_legacy=False):
     stored_slot = empty.get(SLOT_PROP)
 
     if owner_name is not None:
-        if owner_name != armature.name or stored_slot != slot_key:
+        if stored_slot is not None and stored_slot != slot_key:
             return None
-        return empty
+        if owner_name == armature.name or allow_cross_armature:
+            return empty
+        return None
 
     if not adopt_legacy:
         return None
@@ -299,7 +357,7 @@ def _get_slot_empty(context, armature, slot_key, adopt_legacy=False):
     return None
 
 
-def _get_registered_empties(context, armature, adopt_legacy=False):
+def _get_registered_empties(context, armature, adopt_legacy=False, allow_cross_armature=False):
     result = []
     seen = set()
 
@@ -309,6 +367,7 @@ def _get_registered_empties(context, armature, adopt_legacy=False):
             armature,
             key,
             adopt_legacy=adopt_legacy,
+            allow_cross_armature=allow_cross_armature,
         )
         if empty and empty.name not in seen:
             result.append(empty)
@@ -323,6 +382,7 @@ def _remove_empty_if_owned(context, armature, slot_key):
         armature,
         slot_key,
         adopt_legacy=True,
+        allow_cross_armature=False,
     )
     if empty is None:
         return False
@@ -408,6 +468,63 @@ def _remove_prop_empty_if_owned(context, prop_key):
 # ──────────────────────────────────────────────
 # 4. OPERADORES (CHARACTER RETARGET)
 # ──────────────────────────────────────────────
+class RETARGET_OT_symmetrize_bones(Operator):
+    """Busca y asigna automáticamente los huesos simétricos en Hands, Feet, Elbows y Knees."""
+    bl_idname = "retarget.symmetrize_bones"
+    bl_label = "Symmetrize"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+
+        scene = context.scene
+        filled = 0
+        not_found = []
+
+        for left_key, right_key in SYMMETRY_PAIRS:
+            left_slot = _slot_property(scene, left_key)
+            right_slot = _slot_property(scene, right_key)
+
+            if left_slot.bone_name and not right_slot.bone_name:
+                sym_name = _find_symmetric_bone_name(armature, left_slot.bone_name)
+                if sym_name:
+                    right_slot.bone_name = sym_name
+                    if not right_slot.empty_name:
+                        right_slot.empty_name = f"RET_{right_key.replace('_', ' ').title()}"
+                    filled += 1
+                else:
+                    not_found.append(right_key)
+
+            elif right_slot.bone_name and not left_slot.bone_name:
+                sym_name = _find_symmetric_bone_name(armature, right_slot.bone_name)
+                if sym_name:
+                    left_slot.bone_name = sym_name
+                    if not left_slot.empty_name:
+                        left_slot.empty_name = f"RET_{left_key.replace('_', ' ').title()}"
+                    filled += 1
+                else:
+                    not_found.append(left_key)
+
+        if filled == 0 and not not_found:
+            self.report(
+                {'WARNING'},
+                "Asigna al menos un lado (Left o Right) en Hands, Feet, Elbows o Knees para simetrizar.",
+            )
+            return {'CANCELLED'}
+
+        if not_found:
+            self.report(
+                {'INFO'},
+                f"Simetrizados: {filled} hueso(s). Sin coincidencia en: {', '.join(not_found)}.",
+            )
+        else:
+            self.report({'INFO'}, f"Simetrizados: {filled} hueso(s) completado(s).")
+
+        return {'FINISHED'}
+
+
 class RETARGET_OT_pick_bone(Operator):
     bl_idname = "retarget.pick_bone"
     bl_label = "Pick Bone from Selection"
@@ -559,7 +676,7 @@ class RETARGET_OT_create_empty(Operator):
             return {'CANCELLED'}
 
         existing = _get_slot_empty(
-            context, armature, self.slot, adopt_legacy=True
+            context, armature, self.slot, adopt_legacy=True, allow_cross_armature=False
         )
         if existing:
             self.report({'WARNING'}, f"El slot ya tiene el Empty '{existing.name}'.")
@@ -634,7 +751,7 @@ class RETARGET_OT_create_all(Operator):
                 continue
 
             existing = _get_slot_empty(
-                context, armature, key, adopt_legacy=True
+                context, armature, key, adopt_legacy=True, allow_cross_armature=False
             )
             if existing:
                 skipped += 1
@@ -672,7 +789,7 @@ class RETARGET_OT_clear_constraints_empties(Operator):
 
         cleared = 0
         empties = _get_registered_empties(
-            context, armature, adopt_legacy=True
+            context, armature, adopt_legacy=True, allow_cross_armature=True
         )
 
         for empty in empties:
@@ -682,13 +799,13 @@ class RETARGET_OT_clear_constraints_empties(Operator):
 
         self.report(
             {'INFO'},
-            f"Restricciones eliminadas en {cleared} Empty(s) de '{armature.name}'.",
+            f"Restricciones eliminadas en {cleared} Empty(s).",
         )
         return {'FINISHED'}
 
 
 class RETARGET_OT_select_and_open_bake(Operator):
-    """Selecciona solo los Empties registrados para Source Armature y abre Bake."""
+    """Selecciona los Empties registrados y abre Bake."""
     bl_idname = "retarget.select_and_open_bake"
     bl_label = "Auto-Select Empties & Bake"
     bl_options = {'REGISTER', 'UNDO'}
@@ -699,7 +816,7 @@ class RETARGET_OT_select_and_open_bake(Operator):
             return {'CANCELLED'}
 
         empties = _get_registered_empties(
-            context, armature, adopt_legacy=True
+            context, armature, adopt_legacy=True, allow_cross_armature=False
         )
         if not empties:
             self.report(
@@ -756,7 +873,7 @@ class RETARGET_OT_apply_to_rig(Operator):
 
             pose_bone = armature.pose.bones.get(slot_prop.bone_name)
             empty = _get_slot_empty(
-                context, armature, key, adopt_legacy=True
+                context, armature, key, adopt_legacy=True, allow_cross_armature=True
             )
 
             if pose_bone and empty:
@@ -831,7 +948,9 @@ class RETARGET_OT_select_rig_and_open_bake(Operator):
             if not slot_prop.bone_name:
                 continue
 
-            empty = _get_slot_empty(context, armature, key, adopt_legacy=True)
+            empty = _get_slot_empty(
+                context, armature, key, adopt_legacy=True, allow_cross_armature=True
+            )
             if empty is None:
                 continue
 
@@ -886,7 +1005,7 @@ class RETARGET_OT_clear_rig_constraints(Operator):
         registered_empty_names = {
             empty.name
             for empty in _get_registered_empties(
-                context, armature, adopt_legacy=True
+                context, armature, adopt_legacy=True, allow_cross_armature=True
             )
         }
 
@@ -909,8 +1028,10 @@ class RETARGET_OT_clear_rig_constraints(Operator):
             for constraint in list(pose_bone.constraints):
                 if (
                     constraint.type in {'COPY_LOCATION', 'COPY_ROTATION'}
-                    and constraint.target is not None
-                    and constraint.target.name in registered_empty_names
+                    and (
+                        (constraint.target is not None and constraint.target.name in registered_empty_names)
+                        or constraint.name.startswith("RET_")
+                    )
                 ):
                     pose_bone.constraints.remove(constraint)
                     cleared += 1
@@ -1015,7 +1136,7 @@ class RETARGET_OT_clear_root_constraints(Operator):
             return {'CANCELLED'}
 
         root_slot = _slot_property(context.scene, "root_bone")
-        empty = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False)
+        empty = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False, allow_cross_armature=True)
 
         empty_cleared = 0
         bone_cleared = 0
@@ -1097,7 +1218,7 @@ class RETARGET_OT_apply_root_to_bone(Operator):
             self.report({'ERROR'}, "Asigna un Root Bone primero.")
             return {'CANCELLED'}
 
-        empty = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False)
+        empty = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False, allow_cross_armature=True)
         if not empty:
             self.report({'ERROR'}, "No se encontró el Empty de Root Motion.")
             return {'CANCELLED'}
@@ -1188,7 +1309,7 @@ class RETARGET_OT_clean_root_motion(Operator):
             return {'CANCELLED'}
 
         root_slot = _slot_property(context.scene, "root_bone")
-        empty = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False)
+        empty = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False, allow_cross_armature=True)
 
         constraints_removed = 0
         if root_slot and root_slot.bone_name:
@@ -1210,7 +1331,7 @@ class RETARGET_OT_clean_root_motion(Operator):
                 pass
 
         empty_removed = _remove_empty_if_owned(context, armature, "root_bone")
-        if root_slot:
+        if root_slot and empty_removed:
             root_slot.empty_name = ""
             root_slot.created = False
 
@@ -1237,7 +1358,7 @@ class RETARGET_OT_clean_curves_and_empties(Operator):
             return {'CANCELLED'}
 
         registered_empties = _get_registered_empties(
-            context, armature, adopt_legacy=True
+            context, armature, adopt_legacy=True, allow_cross_armature=True
         )
         registered_empty_names = {empty.name for empty in registered_empties}
 
@@ -1261,8 +1382,10 @@ class RETARGET_OT_clean_curves_and_empties(Operator):
             for constraint in list(pose_bone.constraints):
                 if (
                     constraint.type in {'COPY_LOCATION', 'COPY_ROTATION'}
-                    and constraint.target is not None
-                    and constraint.target.name in registered_empty_names
+                    and (
+                        (constraint.target is not None and constraint.target.name in registered_empty_names)
+                        or constraint.name.startswith("RET_")
+                    )
                 ):
                     pose_bone.constraints.remove(constraint)
                     constraints_removed += 1
@@ -1312,10 +1435,9 @@ class RETARGET_OT_clean_curves_and_empties(Operator):
         for key, _, _ in SLOTS_CONFIG:
             if _remove_empty_if_owned(context, armature, key):
                 empties_removed += 1
-
-            slot_prop = _slot_property(context.scene, key)
-            slot_prop.empty_name = ""
-            slot_prop.created = False
+                slot_prop = _slot_property(context.scene, key)
+                slot_prop.empty_name = ""
+                slot_prop.created = False
 
         _remove_empty_collection_if_unused()
 
@@ -1324,7 +1446,7 @@ class RETARGET_OT_clean_curves_and_empties(Operator):
             f"Limpieza de '{armature.name}': "
             f"{constraints_removed} restricciones, "
             f"{curves_removed} curvas Location y "
-            f"{empties_removed} Empties eliminados.",
+            f"{empties_removed} Empties propios eliminados.",
         )
         return {'FINISHED'}
 
@@ -1340,11 +1462,13 @@ class RETARGET_OT_clean_all_setup(Operator):
             return {'CANCELLED'}
 
         registered_empties = _get_registered_empties(
-            context, armature, adopt_legacy=True
+            context, armature, adopt_legacy=True, allow_cross_armature=True
         )
         registered_empty_names = {empty.name for empty in registered_empties}
 
-        root_empty = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False)
+        root_empty = _get_slot_empty(
+            context, armature, "root_bone", adopt_legacy=False, allow_cross_armature=True
+        )
         if root_empty:
             registered_empty_names.add(root_empty.name)
 
@@ -1370,24 +1494,23 @@ class RETARGET_OT_clean_all_setup(Operator):
         for key, _, _ in SLOTS_CONFIG:
             if _remove_empty_if_owned(context, armature, key):
                 empties_removed += 1
-            slot_prop = _slot_property(context.scene, key)
-            slot_prop.empty_name = ""
-            slot_prop.created = False
+                slot_prop = _slot_property(context.scene, key)
+                slot_prop.empty_name = ""
+                slot_prop.created = False
 
         if _remove_empty_if_owned(context, armature, "root_bone"):
             empties_removed += 1
-
-        root_slot = _slot_property(context.scene, "root_bone")
-        if root_slot:
-            root_slot.empty_name = ""
-            root_slot.created = False
+            root_slot = _slot_property(context.scene, "root_bone")
+            if root_slot:
+                root_slot.empty_name = ""
+                root_slot.created = False
 
         _remove_empty_collection_if_unused()
 
         self.report(
             {'INFO'},
             f"Setup limpiado en '{armature.name}': "
-            f"{constraints_removed} constraints y {empties_removed} Empties eliminados (curvas conservadas).",
+            f"{constraints_removed} constraints y {empties_removed} Empties propios eliminados (curvas conservadas).",
         )
         return {'FINISHED'}
 
@@ -1406,10 +1529,9 @@ class RETARGET_OT_clear_all(Operator):
         for key, _, _ in SLOTS_CONFIG:
             if _remove_empty_if_owned(context, armature, key):
                 removed += 1
-
-            slot_prop = _slot_property(context.scene, key)
-            slot_prop.empty_name = ""
-            slot_prop.created = False
+                slot_prop = _slot_property(context.scene, key)
+                slot_prop.empty_name = ""
+                slot_prop.created = False
 
         _remove_empty_collection_if_unused()
 
@@ -2037,72 +2159,102 @@ class RETARGET_PT_panel(Panel):
 
         layout.separator()
 
-        for key, label, _ in SLOTS_CONFIG:
-            slot_prop = _slot_property(scene, key)
-            box = layout.box()
+        # --- DESPLEGABLE GLOBAL DE BONE SLOTS + SYMMETRIZE ---
+        slots_container = layout.box()
+        slots_header = slots_container.row(align=True)
+        slots_tri = 'TRIA_DOWN' if scene.retarget_slots_expanded else 'TRIA_RIGHT'
+        assigned_count = sum(
+            1 for key, _, _ in SLOTS_CONFIG if _slot_property(scene, key).bone_name
+        )
+        slots_header.prop(
+            scene,
+            "retarget_slots_expanded",
+            text=f"Bone Slots ({assigned_count}/{len(SLOTS_CONFIG)})",
+            icon=slots_tri,
+            emboss=False,
+        )
+        slots_header.operator(
+            "retarget.symmetrize_bones",
+            text="Symmetrize",
+            icon='ARROW_LEFTRIGHT',
+        )
 
-            row_head = box.row(align=True)
-            icon_tri = 'TRIA_DOWN' if slot_prop.expanded else 'TRIA_RIGHT'
-            row_head.prop(
-                slot_prop,
-                "expanded",
-                text=label,
-                icon=icon_tri,
-                emboss=False,
-            )
+        if scene.retarget_slots_expanded:
+            for key, label, _ in SLOTS_CONFIG:
+                slot_prop = _slot_property(scene, key)
+                box = slots_container.box()
 
-            clear_op = row_head.operator("retarget.clear_slot", icon='X', text="")
-            clear_op.slot = key
+                row_head = box.row(align=True)
+                icon_tri = 'TRIA_DOWN' if slot_prop.expanded else 'TRIA_RIGHT'
+                row_head.prop(
+                    slot_prop,
+                    "expanded",
+                    text=label,
+                    icon=icon_tri,
+                    emboss=False,
+                )
 
-            if slot_prop.expanded:
-                row_bone = box.row(align=True)
+                if slot_prop.bone_name:
+                    row_head.label(text="", icon='CHECKMARK')
 
-                if armature and armature.data:
-                    row_bone.prop_search(
-                        slot_prop,
-                        "bone_name",
-                        armature.data,
-                        "bones",
-                        text="Bone",
+                clear_op = row_head.operator("retarget.clear_slot", icon='X', text="")
+                clear_op.slot = key
+
+                if slot_prop.expanded:
+                    row_bone = box.row(align=True)
+
+                    if armature and armature.data:
+                        row_bone.prop_search(
+                            slot_prop,
+                            "bone_name",
+                            armature.data,
+                            "bones",
+                            text="Bone",
+                        )
+                    else:
+                        row_bone.prop(
+                            slot_prop,
+                            "bone_name",
+                            text="Bone",
+                        )
+
+                    pick_op = row_bone.operator(
+                        "retarget.pick_bone",
+                        icon='BONE_DATA',
+                        text="",
                     )
-                else:
-                    row_bone.prop(
-                        slot_prop,
-                        "bone_name",
-                        text="Bone",
+                    pick_op.slot = key
+
+                    select_op = row_bone.operator(
+                        "retarget.select_bone_in_viewport",
+                        icon='ZOOM_ALL',
+                        text="",
                     )
+                    select_op.slot = key
 
-                pick_op = row_bone.operator(
-                    "retarget.pick_bone",
-                    icon='BONE_DATA',
-                    text="",
-                )
-                pick_op.slot = key
+                    box.prop(slot_prop, "empty_name", text="Empty")
 
-                select_op = row_bone.operator(
-                    "retarget.select_bone_in_viewport",
-                    icon='ZOOM_ALL',
-                    text="",
-                )
-                select_op.slot = key
+                    create_row = box.row()
+                    create_op = create_row.operator(
+                        "retarget.create_empty",
+                        text="Create",
+                    )
+                    create_op.slot = key
 
-                box.prop(slot_prop, "empty_name", text="Empty")
-
-                create_row = box.row()
-                create_op = create_row.operator(
-                    "retarget.create_empty",
-                    text="Create",
-                )
-                create_op.slot = key
-
-                valid_empty = (
-                    _get_slot_empty(context, armature, key, adopt_legacy=False)
-                    if armature else None
-                )
-                create_row.label(
-                    text="",
-                    icon='CHECKMARK' if valid_empty else 'BLANK1',
-                )
+                    valid_empty = (
+                        _get_slot_empty(
+                            context,
+                            armature,
+                            key,
+                            adopt_legacy=True,
+                            allow_cross_armature=True,
+                        )
+                        if armature else None
+                    )
+                    create_row.label(
+                        text="",
+                        icon='CHECKMARK' if valid_empty else 'BLANK1',
+                    )
 
         layout.separator()
 
@@ -2209,7 +2361,13 @@ class RETARGET_PT_panel(Panel):
         row_rm_create = part_three.row(align=True)
         row_rm_create.operator("retarget.create_root_empty", icon='EMPTY_ARROWS')
         valid_root_empty = (
-            _get_slot_empty(context, armature, "root_bone", adopt_legacy=False)
+            _get_slot_empty(
+                context,
+                armature,
+                "root_bone",
+                adopt_legacy=False,
+                allow_cross_armature=True,
+            )
             if armature else None
         )
         row_rm_create.label(
@@ -2406,6 +2564,7 @@ class RETARGET_PT_props_subpanel(Panel):
 classes = (
     RETargetSlot,
     RETargetPropSlot,
+    RETARGET_OT_symmetrize_bones,
     RETARGET_OT_pick_bone,
     RETARGET_OT_select_bone_in_viewport,
     RETARGET_OT_clear_slot,

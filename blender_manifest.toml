@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "retarget_to_empties"
-version = "1.0.3"
+version = "1.0.4"
 name = "Retarget to Empties"
 tagline = "IK retargeting via Empties, root motion, and prop workflow"
 maintainer = "Slay <jessandn@gmail.com>"
