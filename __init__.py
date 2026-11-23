@@ -1,13 +1,15 @@
+import json
+import os
 import bpy
 from bpy.props import StringProperty, BoolProperty, EnumProperty
 from bpy.types import PropertyGroup, Panel, Operator
 
 
 # ──────────────────────────────────────────────
-# 1. CONFIGURACIÓN DE SLOTS (CHARACTER & PROPS)
+# 1. SLOT CONFIGURATION (CHARACTER & PROPS)
 # ──────────────────────────────────────────────
-# True  = conserva Location + Rotation (manos, pies y torso).
-# False = elimina únicamente Location (articulaciones).
+# True  = preserves Location + Rotation (hands, feet, and torso).
+# False = removes Location only (joints).
 SLOTS_CONFIG = [
     ("left_hand",    "Left Hand",    True),
     ("right_hand",   "Right Hand",   True),
@@ -40,10 +42,390 @@ PROP_SLOTS_CONFIG = [
 OWNER_PROP = "_retarget_owner_armature"
 SLOT_PROP = "_retarget_slot"
 PROP_SLOT_PROP = "_retarget_prop_slot"
+BUILTIN_BONE_PRESETS = {
+    "RIGIFY_CTRL": {
+        "label": "Rigify (Controls)",
+        "bones": {
+            "left_hand": ["hand_ik.L", "hand_fk.L", "hand.L"],
+            "right_hand": ["hand_ik.R", "hand_fk.R", "hand.R"],
+            "left_foot": ["foot_ik.L", "foot_fk.L", "foot.L"],
+            "right_foot": ["foot_ik.R", "foot_fk.R", "foot.R"],
+            "torso": ["torso", "hips"],
+            "chest": ["chest", "spine_fk.003", "spine_fk.002"],
+            "head": ["head"],
+            "left_elbow": ["upper_arm_fk.L", "forearm_fk.L", "elbow_target.L"],
+            "right_elbow": ["upper_arm_fk.R", "forearm_fk.R", "elbow_target.R"],
+            "left_knee": ["thigh_fk.L", "shin_fk.L", "knee_target.L"],
+            "right_knee": ["thigh_fk.R", "shin_fk.R", "knee_target.R"],
+            "root_bone": ["root"],
+        },
+    },
+    "METARIG_DEF": {
+        "label": "Metarig / Deform",
+        "bones": {
+            "left_hand": ["hand.L", "DEF-hand.L"],
+            "right_hand": ["hand.R", "DEF-hand.R"],
+            "left_foot": ["foot.L", "DEF-foot.L"],
+            "right_foot": ["foot.R", "DEF-foot.R"],
+            "torso": ["spine", "DEF-spine"],
+            "chest": ["spine.003", "chest", "DEF-spine.003", "DEF-chest"],
+            "head": ["spine.006", "head", "DEF-spine.006", "DEF-head"],
+            "left_elbow": ["forearm.L", "DEF-forearm.L"],
+            "right_elbow": ["forearm.R", "DEF-forearm.R"],
+            "left_knee": ["shin.L", "DEF-shin.L"],
+            "right_knee": ["shin.R", "DEF-shin.R"],
+            "root_bone": ["root"],
+        },
+    },
+    "AUTO_RIG_PRO": {
+        "label": "Auto-Rig Pro",
+        "bones": {
+            "left_hand": ["c_hand_ik.l", "c_hand_fk.l", "hand.l"],
+            "right_hand": ["c_hand_ik.r", "c_hand_fk.r", "hand.r"],
+            "left_foot": ["c_foot_ik.l", "c_foot_fk.l", "foot.l"],
+            "right_foot": ["c_foot_ik.r", "c_foot_fk.r", "foot.r"],
+            "torso": ["c_root_master.x", "c_hips.x", "hips.x"],
+            "chest": ["c_chest.x", "chest.x", "c_spine_02.x"],
+            "head": ["c_head.x", "head.x"],
+            "left_elbow": ["c_arm_fk.l", "c_forearm_fk.l", "c_arms_pole.l"],
+            "right_elbow": ["c_arm_fk.r", "c_forearm_fk.r", "c_arms_pole.r"],
+            "left_knee": ["c_leg_fk.l", "c_shin_fk.l", "c_legs_pole.l"],
+            "right_knee": ["c_leg_fk.r", "c_shin_fk.r", "c_legs_pole.r"],
+            "root_bone": ["root.x", "c_pos.x", "root"],
+        },
+    },
+    "MIXAMO": {
+        "label": "Mixamo",
+        "bones": {
+            "left_hand": ["mixamorig:LeftHand", "LeftHand"],
+            "right_hand": ["mixamorig:RightHand", "RightHand"],
+            "left_foot": ["mixamorig:LeftFoot", "LeftFoot"],
+            "right_foot": ["mixamorig:RightFoot", "RightFoot"],
+            "torso": ["mixamorig:Hips", "Hips"],
+            "chest": ["mixamorig:Spine2", "Spine2", "mixamorig:Chest", "Chest"],
+            "head": ["mixamorig:Head", "Head"],
+            "left_elbow": ["mixamorig:LeftForeArm", "LeftForeArm"],
+            "right_elbow": ["mixamorig:RightForeArm", "RightForeArm"],
+            "left_knee": ["mixamorig:LeftLeg", "LeftLeg"],
+            "right_knee": ["mixamorig:RightLeg", "RightLeg"],
+            "root_bone": ["mixamorig:Hips", "root", "Hips"],
+        },
+    },
+    "UE_MANNEQUIN": {
+        "label": "UE Mannequin",
+        "bones": {
+            "left_hand": ["hand_l", "ik_hand_l"],
+            "right_hand": ["hand_r", "ik_hand_r"],
+            "left_foot": ["foot_l", "ik_foot_l"],
+            "right_foot": ["foot_r", "ik_foot_r"],
+            "torso": ["pelvis"],
+            "chest": ["spine_03", "spine_05"],
+            "head": ["head"],
+            "left_elbow": ["lowerarm_l"],
+            "right_elbow": ["lowerarm_r"],
+            "left_knee": ["calf_l"],
+            "right_knee": ["calf_r"],
+            "root_bone": ["root"],
+        },
+    },
+}
+
+_CUSTOM_PRESETS_CACHE = None
+
+
+def _get_custom_presets_filepath():
+    config_dir = bpy.utils.user_resource('CONFIG', create=True)
+    return os.path.join(config_dir, "retarget_empties_presets.json")
+
+
+def _load_custom_presets(force_reload=False):
+    global _CUSTOM_PRESETS_CACHE
+    if _CUSTOM_PRESETS_CACHE is not None and not force_reload:
+        return _CUSTOM_PRESETS_CACHE
+
+    filepath = _get_custom_presets_filepath()
+    if not os.path.exists(filepath):
+        _CUSTOM_PRESETS_CACHE = {}
+        return _CUSTOM_PRESETS_CACHE
+
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            _CUSTOM_PRESETS_CACHE = data
+        else:
+            _CUSTOM_PRESETS_CACHE = {}
+    except Exception:
+        _CUSTOM_PRESETS_CACHE = {}
+
+    return _CUSTOM_PRESETS_CACHE
+
+
+def _save_custom_presets(presets_dict):
+    global _CUSTOM_PRESETS_CACHE
+    _CUSTOM_PRESETS_CACHE = presets_dict
+    filepath = _get_custom_presets_filepath()
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(presets_dict, f, indent=2, ensure_ascii=False)
+
+
+def _get_all_presets():
+    merged = {}
+    for key, val in BUILTIN_BONE_PRESETS.items():
+        merged[key] = {
+            "label": val["label"],
+            "bones": dict(val["bones"]),
+            "builtin": True,
+        }
+    custom = _load_custom_presets()
+    for key, val in custom.items():
+        if isinstance(val, dict) and "bones" in val:
+            merged[key] = {
+                "label": val.get("label", key),
+                "bones": dict(val["bones"]),
+                "builtin": False,
+            }
+    return merged
+
+
+def _preset_enum_items(self, context):
+    items = [
+        ('AUTO', "Auto-Detect (Best Match)", "Automatically detects the best-matching rig preset"),
+    ]
+    all_presets = _get_all_presets()
+    for key, info in all_presets.items():
+        tag = "" if info.get("builtin") else " [Custom]"
+        items.append((key, f"{info['label']}{tag}", f"Apply preset {info['label']}"))
+    return items
+
+
+def _score_preset_for_armature(armature, preset_bones):
+    if armature is None or armature.type != 'ARMATURE' or not armature.data:
+        return 0
+    score = 0
+    for slot_key, candidates in preset_bones.items():
+        if isinstance(candidates, str):
+            candidates = [candidates]
+        for cand in candidates:
+            if _get_bone(armature, cand) is not None:
+                score += 1
+                break
+    return score
+
+
+def _heuristic_find_bone(armature, slot_key):
+    """Heuristic fallback search by keywords and side."""
+    if armature is None or armature.type != 'ARMATURE' or not armature.data:
+        return None
+
+    side_tokens = {
+        "left": ("left", ".l", "_l", "-l", "l_"),
+        "right": ("right", ".r", "_r", "-r", "r_"),
+    }
+
+    want_side = None
+    if slot_key.startswith("left_"):
+        want_side = "left"
+    elif slot_key.startswith("right_"):
+        want_side = "right"
+
+    keywords_map = {
+        "left_hand": ("hand", "wrist"),
+        "right_hand": ("hand", "wrist"),
+        "left_foot": ("foot", "ankle"),
+        "right_foot": ("foot", "ankle"),
+        "torso": ("torso", "hips", "pelvis", "cog"),
+        "chest": ("chest", "thorax", "spine_03", "spine_02", "spine2"),
+        "head": ("head",),
+        "left_elbow": ("forearm", "lowerarm", "elbow"),
+        "right_elbow": ("forearm", "lowerarm", "elbow"),
+        "left_knee": ("shin", "calf", "lowerleg", "knee"),
+        "right_knee": ("shin", "calf", "lowerleg", "knee"),
+        "root_bone": ("root",),
+    }
+
+    keywords = keywords_map.get(slot_key, ())
+    if not keywords:
+        return None
+
+    for bone in armature.data.bones:
+        b_low = bone.name.lower()
+        if any(skip in b_low for skip in ("twist", "adj", "corrective", "finger", "toe", "eye", "jaw")):
+            continue
+
+        if want_side == "left":
+            has_left = any(tok in b_low for tok in side_tokens["left"]) or b_low.endswith("l")
+            has_right = any(tok in b_low for tok in side_tokens["right"])
+            if not has_left or has_right:
+                continue
+        elif want_side == "right":
+            has_right = any(tok in b_low for tok in side_tokens["right"]) or b_low.endswith("r")
+            has_left = any(tok in b_low for tok in side_tokens["left"])
+            if not has_right or has_left:
+                continue
+
+        if any(kw in b_low for kw in keywords):
+            return bone.name
+
+    return None
+
+
+def _apply_preset_to_armature(context, armature, preset_key, overwrite=False, use_heuristic_fallback=True):
+    """Applies a preset (or Auto-Detect) to the active armature slots."""
+    scene = context.scene
+    all_presets = _get_all_presets()
+
+    chosen_key = preset_key
+    chosen_label = ""
+    preset_bones = {}
+
+    if preset_key == 'AUTO':
+        best_key = None
+        best_score = 0
+        for key, info in all_presets.items():
+            sc = _score_preset_for_armature(armature, info["bones"])
+            if sc > best_score:
+                best_score = sc
+                best_key = key
+        if best_key is not None and best_score > 0:
+            chosen_key = best_key
+            chosen_label = all_presets[best_key]["label"]
+            preset_bones = all_presets[best_key]["bones"]
+        else:
+            chosen_label = "Heuristic Auto-Search"
+    else:
+        info = all_presets.get(preset_key)
+        if not info:
+            return 0, "Unknown"
+        chosen_label = info["label"]
+        preset_bones = info["bones"]
+
+    assigned = 0
+
+    for slot_key in _all_character_slot_keys():
+        slot_prop = _slot_property(scene, slot_key)
+        if slot_prop is None:
+            continue
+        if slot_prop.bone_name and not overwrite:
+            continue
+
+        candidates = preset_bones.get(slot_key, [])
+        if isinstance(candidates, str):
+            candidates = [candidates]
+
+        matched_name = None
+        for cand in candidates:
+            bone = _get_bone(armature, cand)
+            if bone is not None:
+                matched_name = bone.name
+                break
+
+        if matched_name is None and use_heuristic_fallback:
+            matched_name = _heuristic_find_bone(armature, slot_key)
+
+        if matched_name:
+            slot_prop.bone_name = matched_name
+            if not slot_prop.empty_name:
+                if slot_key == "root_bone":
+                    slot_prop.empty_name = "RET_Root_Motion"
+                else:
+                    slot_prop.empty_name = f"RET_{slot_key.replace('_', ' ').title()}"
+            assigned += 1
+
+    # Complete symmetry if any pair remained incomplete
+    for left_key, right_key in SYMMETRY_PAIRS:
+        left_slot = _slot_property(scene, left_key)
+        right_slot = _slot_property(scene, right_key)
+        if left_slot.bone_name and not right_slot.bone_name:
+            sym = _find_symmetric_bone_name(armature, left_slot.bone_name)
+            if sym:
+                right_slot.bone_name = sym
+                if not right_slot.empty_name:
+                    right_slot.empty_name = f"RET_{right_key.replace('_', ' ').title()}"
+                assigned += 1
+        elif right_slot.bone_name and not left_slot.bone_name:
+            sym = _find_symmetric_bone_name(armature, right_slot.bone_name)
+            if sym:
+                left_slot.bone_name = sym
+                if not left_slot.empty_name:
+                    left_slot.empty_name = f"RET_{left_key.replace('_', ' ').title()}"
+                assigned += 1
+
+    return assigned, chosen_label
+
+
+BONE_MAP_PROP = "_retarget_bone_map"
+_SYNCING_BONE_MAP = False
+
+
+def _all_character_slot_keys():
+    keys = [key for key, _, _ in SLOTS_CONFIG]
+    keys.append("root_bone")
+    return keys
+
+
+def _get_armature_bone_map_dict(armature):
+    if armature is None or armature.type != 'ARMATURE':
+        return {}
+    raw = armature.get(BONE_MAP_PROP)
+    if raw is None:
+        return {}
+    try:
+        return dict(raw)
+    except Exception:
+        return {}
+
+
+def _save_slot_bone_to_armature(armature, slot_key, bone_name):
+    if armature is None or armature.type != 'ARMATURE':
+        return
+    if slot_key not in _all_character_slot_keys():
+        return
+    mapping = _get_armature_bone_map_dict(armature)
+    if bone_name:
+        mapping[slot_key] = bone_name
+    else:
+        mapping.pop(slot_key, None)
+    armature[BONE_MAP_PROP] = mapping
+
+
+def _sync_scene_bones_from_armature(scene, armature):
+    """Loads saved bone names for this Armature into the scene slots."""
+    global _SYNCING_BONE_MAP
+    _SYNCING_BONE_MAP = True
+    try:
+        mapping = _get_armature_bone_map_dict(armature)
+        for key in _all_character_slot_keys():
+            slot_prop = _slot_property(scene, key)
+            if slot_prop is None:
+                continue
+            saved_bone = mapping.get(key, "") if armature is not None else ""
+            if slot_prop.bone_name != saved_bone:
+                slot_prop.bone_name = saved_bone
+    finally:
+        _SYNCING_BONE_MAP = False
+
+
+def _on_slot_bone_name_updated(self, context):
+    if _SYNCING_BONE_MAP or context is None or context.scene is None:
+        return
+    armature = context.scene.retarget_armature
+    if armature is None or armature.type != 'ARMATURE':
+        return
+    for key in _all_character_slot_keys():
+        if _slot_property(context.scene, key) == self:
+            _save_slot_bone_to_armature(armature, key, self.bone_name)
+            break
+
+
+def _on_source_armature_updated(self, context):
+    if context is None:
+        return
+    _sync_scene_bones_from_armature(self, self.retarget_armature)
 
 
 # ──────────────────────────────────────────────
-# 2. PROPERTY GROUP Y PROPIEDADES DE ESCENA
+# 2. PROPERTY GROUPS & SCENE PROPERTIES
 # ──────────────────────────────────────────────
 def poll_armature(self, obj):
     return obj is not None and obj.type == 'ARMATURE'
@@ -68,18 +450,19 @@ def poll_prop_target_object(self, obj):
 class RETargetSlot(PropertyGroup):
     bone_name: StringProperty(
         name="Bone",
-        description="Nombre del hueso asignado a este slot",
+        description="Name of the bone assigned to this slot",
         default="",
+        update=_on_slot_bone_name_updated,
     )
     empty_name: StringProperty(
         name="Empty Name",
-        description="Empty asociado exclusivamente a este slot",
+        description="Empty exclusively associated with this slot",
         default="",
     )
     created: BoolProperty(name="Created", default=False)
     expanded: BoolProperty(
         name="Expanded",
-        description="Mostrar/Ocultar sección",
+        description="Show/Hide section",
         default=False,
     )
 
@@ -87,58 +470,58 @@ class RETargetSlot(PropertyGroup):
 class RETargetPropSlot(PropertyGroup):
     prop_label: StringProperty(
         name="Label",
-        description="Nombre personalizado del prop (ej. Door, Sword, Rifle)",
+        description="Custom prop name (e.g., Door, Sword, Rifle)",
         default="",
     )
     source_type: EnumProperty(
         name="Source Type",
-        description="Tipo de origen animado del prop",
+        description="Animated source type for the prop",
         items=[
-            ('OBJECT', "Object / Mesh", "Objeto animado directamente (puerta, arma, accesorio sin rig)"),
-            ('BONE', "Armature Bone", "Hueso específico dentro de un Rig/Armature"),
+            ('OBJECT', "Object / Mesh", "Directly animated object (door, weapon, unrigged accessory)"),
+            ('BONE', "Armature Bone", "Specific bone inside a Rig/Armature"),
         ],
         default='OBJECT',
     )
     prop_object: bpy.props.PointerProperty(
         type=bpy.types.Object,
         name="Prop Object",
-        description="Objeto o Armature de origen del prop",
+        description="Source Object or Armature for the prop",
         poll=poll_prop_source_object,
     )
     prop_bone_name: StringProperty(
         name="Prop Bone",
-        description="Hueso de origen del prop (si Source es Armature Bone)",
+        description="Source bone for the prop (when Source is Armature Bone)",
         default="",
     )
     target_type: EnumProperty(
         name="Target Type",
-        description="Tipo de destino al que se transferirá el movimiento en Step 2",
+        description="Target type to receive the motion in Step 2",
         items=[
-            ('OBJECT', "Object / Mesh", "Transferir movimiento a un Objeto directamente"),
-            ('BONE', "Armature Bone", "Transferir movimiento a un hueso de una Armature"),
+            ('OBJECT', "Object / Mesh", "Transfer motion directly to an Object"),
+            ('BONE', "Armature Bone", "Transfer motion to an Armature bone"),
         ],
         default='BONE',
     )
     target_object: bpy.props.PointerProperty(
         type=bpy.types.Object,
         name="Target Object",
-        description="Objeto o Armature destino para Step 2",
+        description="Target Object or Armature for Step 2",
         poll=poll_prop_target_object,
     )
     target_bone_name: StringProperty(
         name="Target Bone",
-        description="Hueso destino dentro de Target Object (si Target es Armature Bone)",
+        description="Target bone inside Target Object (when Target is Armature Bone)",
         default="",
     )
     empty_name: StringProperty(
         name="Empty Name",
-        description="Empty intermediario para este prop",
+        description="Intermediate Empty for this prop",
         default="",
     )
     created: BoolProperty(name="Created", default=False)
     expanded: BoolProperty(
         name="Expanded",
-        description="Mostrar/Ocultar sección del prop",
+        description="Show/Hide prop section",
         default=False,
     )
 
@@ -155,50 +538,76 @@ def register_scene_props():
 
     scene.retarget_root_bone = bpy.props.PointerProperty(type=RETargetSlot)
 
-    # Desplegables maestros de listas (abiertos por defecto)
+    # Master list dropdowns (expanded by default)
     scene.retarget_slots_expanded = BoolProperty(
         name="Bone Slots",
-        description="Mostrar/Ocultar lista de slots de huesos",
+        description="Show/Hide bone slots list",
         default=True,
     )
     scene.retarget_prop_slots_expanded = BoolProperty(
         name="Prop Slots",
-        description="Mostrar/Ocultar lista de slots de props",
+        description="Show/Hide prop slots list",
         default=True,
     )
 
-    # Desplegables de etapas/secciones (cerrados por defecto)
-    scene.retarget_part1_expanded = BoolProperty(
-        name="Part 1: Rig → Empties",
-        description="Mostrar/Ocultar Part 1",
+    # Module 1: Retarget <-> Empties (Steps 1 & 2)
+    scene.retarget_m1_step1_expanded = BoolProperty(
+        name="Step 1: Rig → Empties",
+        description="Show/Hide Module 1 Step 1 (Rig → Empties)",
         default=False,
     )
-    scene.retarget_part2_expanded = BoolProperty(
-        name="Part 2: Empties → Rig",
-        description="Mostrar/Ocultar Part 2",
+    scene.retarget_m1_step2_expanded = BoolProperty(
+        name="Step 2: Empties → Rig",
+        description="Show/Hide Module 1 Step 2 (Empties → Rig)",
         default=False,
     )
-    scene.retarget_part3_expanded = BoolProperty(
-        name="Part 3: Torso → Root Motion",
-        description="Mostrar/Ocultar Part 3",
+
+    # Module 2: Torso -> Root Motion (Steps 1 & 2)
+    scene.retarget_m2_expanded = BoolProperty(
+        name="Module 2: Torso → Root Motion",
+        description="Show/Hide Module 2 (Torso → Root Motion)",
         default=False,
     )
-    scene.retarget_prop_step1_expanded = BoolProperty(
+    scene.retarget_m2_step1_expanded = BoolProperty(
+        name="Step 1: Torso → Empty",
+        description="Show/Hide Module 2 Step 1 (Torso → Empty)",
+        default=False,
+    )
+    scene.retarget_m2_step2_expanded = BoolProperty(
+        name="Step 2: Empty → Root Bone",
+        description="Show/Hide Module 2 Step 2 (Empty → Root Bone)",
+        default=False,
+    )
+
+    # Module 3: Prop -> Empties (Steps 1 & 2)
+    scene.retarget_m3_step1_expanded = BoolProperty(
         name="Step 1: Prop → Empties",
-        description="Mostrar/Ocultar Step 1 de Props",
+        description="Show/Hide Module 3 Step 1 (Prop → Empties)",
         default=False,
     )
-    scene.retarget_prop_step2_expanded = BoolProperty(
+    scene.retarget_m3_step2_expanded = BoolProperty(
         name="Step 2: Empties → Prop",
-        description="Mostrar/Ocultar Step 2 de Props",
+        description="Show/Hide Module 3 Step 2 (Empties → Prop)",
         default=False,
     )
 
     scene.retarget_armature = bpy.props.PointerProperty(
         type=bpy.types.Object,
         name="Source Armature",
-        description="Única armature sobre la que trabajará el módulo principal",
+        description="Source armature used by Module 1 and Module 2",
         poll=poll_armature,
+        update=_on_source_armature_updated,
+    )
+
+    scene.retarget_preset = EnumProperty(
+        name="Rig Preset",
+        description="Bone preset or auto-detection for Source Armature",
+        items=_preset_enum_items,
+    )
+    scene.retarget_preset_overwrite = BoolProperty(
+        name="Overwrite",
+        description="Overwrite slots that already have a bone assigned",
+        default=False,
     )
 
     for key, _ in PROP_SLOTS_CONFIG:
@@ -221,12 +630,16 @@ def unregister_scene_props():
         "retarget_root_bone",
         "retarget_slots_expanded",
         "retarget_prop_slots_expanded",
-        "retarget_part1_expanded",
-        "retarget_part2_expanded",
-        "retarget_part3_expanded",
-        "retarget_prop_step1_expanded",
-        "retarget_prop_step2_expanded",
+        "retarget_m1_step1_expanded",
+        "retarget_m1_step2_expanded",
+        "retarget_m2_expanded",
+        "retarget_m2_step1_expanded",
+        "retarget_m2_step2_expanded",
+        "retarget_m3_step1_expanded",
+        "retarget_m3_step2_expanded",
         "retarget_armature",
+        "retarget_preset",
+        "retarget_preset_overwrite",
     )
     for prop_name in extra_props:
         if hasattr(scene, prop_name):
@@ -239,10 +652,10 @@ def unregister_scene_props():
 
 
 # ──────────────────────────────────────────────
-# 3. FUNCIONES AUXILIARES (CHARACTER)
+# 3. HELPER FUNCTIONS (MODULE 1 & MODULE 2)
 # ──────────────────────────────────────────────
 def _get_armature(context):
-    """Devuelve exclusivamente Source Armature del módulo principal."""
+    """Returns the Source Armature for Module 1 and Module 2."""
     armature = context.scene.retarget_armature
 
     if armature is None or armature.type != 'ARMATURE':
@@ -257,7 +670,7 @@ def _validate_armature(context, operator):
     if armature is None:
         operator.report(
             {'ERROR'},
-            "Asigna una Source Armature válida antes de usar este operador.",
+            "Assign a valid Source Armature before using this operator.",
         )
         return None
 
@@ -280,7 +693,7 @@ def _get_bone(armature, bone_name):
 
 
 def _find_symmetric_bone_name(armature, bone_name):
-    """Busca el nombre simétrico de un hueso usando Blender flip_name y convenciones comunes."""
+    """Finds the symmetric bone name using Blender flip_name and common naming conventions."""
     if not armature or not armature.data or not bone_name:
         return None
 
@@ -320,7 +733,7 @@ def _find_symmetric_bone_name(armature, bone_name):
 
 
 def _activate_armature_pose(context, armature):
-    """Activa la armature designada y la coloca en Pose Mode."""
+    """Activates the designated armature and switches it to Pose Mode."""
     if context.object and context.object.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
 
@@ -430,6 +843,22 @@ def _remove_empty_if_owned(context, armature, slot_key):
     return True
 
 
+def _remove_slot_empty_any_armature(context, armature, slot_key):
+    """Removes the slot's registered Empty even if it belongs to another source armature."""
+    empty = _get_slot_empty(
+        context,
+        armature,
+        slot_key,
+        adopt_legacy=True,
+        allow_cross_armature=True,
+    )
+    if empty is None:
+        return False
+
+    bpy.data.objects.remove(empty, do_unlink=True)
+    return True
+
+
 def _remove_empty_collection_if_unused():
     collection = bpy.data.collections.get("RETARGET_Empties")
     if collection and not collection.objects and not collection.children:
@@ -442,7 +871,7 @@ def _ensure_object_mode(context):
 
 
 # ──────────────────────────────────────────────
-# 3.5. FUNCIONES AUXILIARES (PROPS)
+# 3.5. HELPER FUNCTIONS (MODULE 3: PROPS)
 # ──────────────────────────────────────────────
 def _get_or_create_props_collection(context):
     col_name = "RETARGET_Prop_Empties"
@@ -505,10 +934,135 @@ def _remove_prop_empty_if_owned(context, prop_key):
 
 
 # ──────────────────────────────────────────────
-# 4. OPERADORES (CHARACTER RETARGET)
+# 4. OPERATORS (MODULE 1: RETARGET <-> EMPTIES)
 # ──────────────────────────────────────────────
+class RETARGET_OT_apply_bone_preset(Operator):
+    """Applies the selected preset (or Auto-Detect) to populate Source Armature bones."""
+    bl_idname = "retarget.apply_bone_preset"
+    bl_label = "Auto-Fill / Apply Preset"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+
+        scene = context.scene
+        preset_key = scene.retarget_preset
+        overwrite = scene.retarget_preset_overwrite
+
+        assigned, label = _apply_preset_to_armature(
+            context,
+            armature,
+            preset_key,
+            overwrite=overwrite,
+            use_heuristic_fallback=(preset_key == 'AUTO'),
+        )
+
+        if assigned == 0:
+            self.report(
+                {'WARNING'},
+                f"No new bones were assigned using '{label}' (enable Overwrite to replace existing assignments).",
+            )
+            return {'CANCELLED'}
+
+        self.report(
+            {'INFO'},
+            f"Preset '{label}': {assigned} bone(s) assigned in '{armature.name}'.",
+        )
+        return {'FINISHED'}
+
+
+class RETARGET_OT_save_custom_preset(Operator):
+    """Saves the current Source Armature bone configuration as a reusable preset."""
+    bl_idname = "retarget.save_custom_preset"
+    bl_label = "Save Bone Preset"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    preset_name: StringProperty(
+        name="Preset Name",
+        description="Name used to identify this bone preset",
+        default="My Custom Rig",
+    )
+
+    def invoke(self, context, event):
+        armature = _validate_armature(context, self)
+        if not armature:
+            return {'CANCELLED'}
+        self.preset_name = f"{armature.name}_Preset"
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        scene = context.scene
+        clean_label = self.preset_name.strip()
+        if not clean_label:
+            self.report({'ERROR'}, "Enter a valid name for the preset.")
+            return {'CANCELLED'}
+
+        bones_dict = {}
+        for slot_key in _all_character_slot_keys():
+            slot_prop = _slot_property(scene, slot_key)
+            if slot_prop and slot_prop.bone_name:
+                bones_dict[slot_key] = [slot_prop.bone_name]
+
+        if not bones_dict:
+            self.report({'ERROR'}, "Assign at least one bone before saving a preset.")
+            return {'CANCELLED'}
+
+        safe_key = "CUSTOM_" + "".join(
+            ch if ch.isalnum() else "_" for ch in clean_label.upper()
+        ).strip("_")
+        if not safe_key or safe_key == "CUSTOM_":
+            safe_key = "CUSTOM_USER_PRESET"
+
+        custom_presets = dict(_load_custom_presets())
+        custom_presets[safe_key] = {
+            "label": clean_label,
+            "bones": bones_dict,
+        }
+        _save_custom_presets(custom_presets)
+
+        try:
+            scene.retarget_preset = safe_key
+        except Exception:
+            pass
+
+        self.report(
+            {'INFO'},
+            f"Preset '{clean_label}' saved with {len(bones_dict)} bone(s).",
+        )
+        return {'FINISHED'}
+
+
+class RETARGET_OT_delete_custom_preset(Operator):
+    """Deletes the currently selected custom preset."""
+    bl_idname = "retarget.delete_custom_preset"
+    bl_label = "Delete Custom Preset"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        scene = context.scene
+        preset_key = scene.retarget_preset
+        if preset_key == 'AUTO' or preset_key in BUILTIN_BONE_PRESETS:
+            self.report({'WARNING'}, "Only custom presets ([Custom]) can be deleted.")
+            return {'CANCELLED'}
+
+        custom_presets = dict(_load_custom_presets())
+        if preset_key not in custom_presets:
+            self.report({'WARNING'}, "The selected preset does not exist in custom presets.")
+            return {'CANCELLED'}
+
+        removed_label = custom_presets[preset_key].get("label", preset_key)
+        del custom_presets[preset_key]
+        _save_custom_presets(custom_presets)
+
+        scene.retarget_preset = 'AUTO'
+        self.report({'INFO'}, f"Custom preset '{removed_label}' deleted.")
+        return {'FINISHED'}
+
+
 class RETARGET_OT_symmetrize_bones(Operator):
-    """Busca y asigna automáticamente los huesos simétricos en Hands, Feet, Elbows y Knees."""
+    """Automatically finds and assigns symmetric bones for Hands, Feet, Elbows, and Knees."""
     bl_idname = "retarget.symmetrize_bones"
     bl_label = "Symmetrize"
     bl_options = {'REGISTER', 'UNDO'}
@@ -549,17 +1103,17 @@ class RETARGET_OT_symmetrize_bones(Operator):
         if filled == 0 and not not_found:
             self.report(
                 {'WARNING'},
-                "Asigna al menos un lado (Left o Right) en Hands, Feet, Elbows o Knees para simetrizar.",
+                "Assign at least one side (Left or Right) in Hands, Feet, Elbows, or Knees to symmetrize.",
             )
             return {'CANCELLED'}
 
         if not_found:
             self.report(
                 {'INFO'},
-                f"Simetrizados: {filled} hueso(s). Sin coincidencia en: {', '.join(not_found)}.",
+                f"Symmetrized: {filled} bone(s). No match found for: {', '.join(not_found)}.",
             )
         else:
-            self.report({'INFO'}, f"Simetrizados: {filled} hueso(s) completado(s).")
+            self.report({'INFO'}, f"Symmetrized: {filled} bone(s) completed.")
 
         return {'FINISHED'}
 
@@ -578,7 +1132,7 @@ class RETARGET_OT_pick_bone(Operator):
 
         slot_prop = _slot_property(context.scene, self.slot)
         if slot_prop is None:
-            self.report({'ERROR'}, "Slot no válido.")
+            self.report({'ERROR'}, "Invalid slot.")
             return {'CANCELLED'}
 
         selected_bone = next(
@@ -593,7 +1147,7 @@ class RETARGET_OT_pick_bone(Operator):
         else:
             self.report(
                 {'ERROR'},
-                "Selecciona un hueso de Source Armature en Pose Mode.",
+                "Select a bone on Source Armature in Pose Mode.",
             )
             return {'CANCELLED'}
 
@@ -607,7 +1161,7 @@ class RETARGET_OT_pick_bone(Operator):
                     f"RET_{self.slot.replace('_', ' ').title()}"
                 )
 
-        self.report({'INFO'}, f"Hueso capturado: {bone_name}")
+        self.report({'INFO'}, f"Bone captured: {bone_name}")
         return {'FINISHED'}
 
 
@@ -625,21 +1179,21 @@ class RETARGET_OT_select_bone_in_viewport(Operator):
 
         slot_prop = _slot_property(context.scene, self.slot)
         if slot_prop is None or not slot_prop.bone_name:
-            self.report({'ERROR'}, "El slot no tiene un hueso asignado.")
+            self.report({'ERROR'}, "This slot has no bone assigned.")
             return {'CANCELLED'}
 
         bone = _get_bone(armature, slot_prop.bone_name)
         if bone is None:
             self.report(
                 {'ERROR'},
-                f"Hueso '{slot_prop.bone_name}' no encontrado en Source Armature.",
+                f"Bone '{slot_prop.bone_name}' not found in Source Armature.",
             )
             return {'CANCELLED'}
 
         try:
             _activate_armature_pose(context, armature)
         except Exception as exc:
-            self.report({'ERROR'}, f"No se pudo activar Source Armature: {exc}")
+            self.report({'ERROR'}, f"Could not activate Source Armature: {exc}")
             return {'CANCELLED'}
 
         for pose_bone in armature.pose.bones:
@@ -650,7 +1204,7 @@ class RETARGET_OT_select_bone_in_viewport(Operator):
             pose_bone.select = True
             armature.data.bones.active = bone
 
-        self.report({'INFO'}, f"Hueso seleccionado: {bone.name}")
+        self.report({'INFO'}, f"Bone selected: {bone.name}")
         return {'FINISHED'}
 
 
@@ -668,7 +1222,7 @@ class RETARGET_OT_clear_slot(Operator):
 
         slot_prop = _slot_property(context.scene, self.slot)
         if slot_prop is None:
-            self.report({'ERROR'}, "Slot no válido.")
+            self.report({'ERROR'}, "Invalid slot.")
             return {'CANCELLED'}
 
         removed = _remove_empty_if_owned(context, armature, self.slot)
@@ -681,9 +1235,9 @@ class RETARGET_OT_clear_slot(Operator):
 
         self.report(
             {'INFO'},
-            "Slot limpiado. " + (
-                "Empty asociado eliminado." if removed
-                else "No se eliminó ningún Empty ajeno a esta armature."
+            "Slot cleared. " + (
+                "Associated Empty deleted." if removed
+                else "No Empty belonging to another armature was deleted."
             ),
         )
         return {'FINISHED'}
@@ -703,14 +1257,14 @@ class RETARGET_OT_create_empty(Operator):
 
         slot_prop = _slot_property(context.scene, self.slot)
         if slot_prop is None or not slot_prop.bone_name:
-            self.report({'ERROR'}, "No hay un hueso válido asignado al slot.")
+            self.report({'ERROR'}, "No valid bone is assigned to this slot.")
             return {'CANCELLED'}
 
         bone = _get_bone(armature, slot_prop.bone_name)
         if bone is None:
             self.report(
                 {'ERROR'},
-                f"Hueso '{slot_prop.bone_name}' no encontrado en Source Armature.",
+                f"Bone '{slot_prop.bone_name}' not found in Source Armature.",
             )
             return {'CANCELLED'}
 
@@ -718,7 +1272,7 @@ class RETARGET_OT_create_empty(Operator):
             context, armature, self.slot, adopt_legacy=True, allow_cross_armature=False
         )
         if existing:
-            self.report({'WARNING'}, f"El slot ya tiene el Empty '{existing.name}'.")
+            self.report({'WARNING'}, f"This slot already has the Empty '{existing.name}'.")
             return {'CANCELLED'}
 
         base_name = (
@@ -734,7 +1288,7 @@ class RETARGET_OT_create_empty(Operator):
 
         pose_bone = armature.pose.bones.get(bone.name)
         if pose_bone is None:
-            self.report({'ERROR'}, "No se encontró el Pose Bone correspondiente.")
+            self.report({'ERROR'}, "Corresponding Pose Bone not found.")
             return {'CANCELLED'}
 
         empty = bpy.data.objects.new(empty_name, None)
@@ -764,7 +1318,7 @@ class RETARGET_OT_create_empty(Operator):
         copy_rotation.owner_space = 'WORLD'
         copy_rotation.target_space = 'WORLD'
 
-        self.report({'INFO'}, f"Empty creado: {empty.name}")
+        self.report({'INFO'}, f"Empty created: {empty.name}")
         return {'FINISHED'}
 
 
@@ -805,13 +1359,13 @@ class RETARGET_OT_create_all(Operator):
         if created == 0:
             self.report(
                 {'WARNING'},
-                f"No se crearon Empties. Omitidos: {skipped}; fallidos: {failed}.",
+                f"No Empties were created. Skipped: {skipped}; failed: {failed}.",
             )
             return {'CANCELLED'}
 
         self.report(
             {'INFO'},
-            f"Empties creados: {created}; omitidos: {skipped}; fallidos: {failed}.",
+            f"Empties created: {created}; skipped: {skipped}; failed: {failed}.",
         )
         return {'FINISHED'}
 
@@ -838,13 +1392,13 @@ class RETARGET_OT_clear_constraints_empties(Operator):
 
         self.report(
             {'INFO'},
-            f"Restricciones eliminadas en {cleared} Empty(s).",
+            f"Constraints removed from {cleared} Empty(s).",
         )
         return {'FINISHED'}
 
 
 class RETARGET_OT_select_and_open_bake(Operator):
-    """Selecciona los Empties registrados y abre Bake."""
+    """Selects registered Empties and opens the Bake dialog."""
     bl_idname = "retarget.select_and_open_bake"
     bl_label = "Auto-Select Empties & Bake"
     bl_options = {'REGISTER', 'UNDO'}
@@ -860,7 +1414,7 @@ class RETARGET_OT_select_and_open_bake(Operator):
         if not empties:
             self.report(
                 {'WARNING'},
-                "No hay Empties válidos asignados a los slots de Source Armature.",
+                "No valid Empties are assigned to Source Armature slots.",
             )
             return {'CANCELLED'}
 
@@ -875,7 +1429,7 @@ class RETARGET_OT_select_and_open_bake(Operator):
 
             self.report(
                 {'INFO'},
-                f"Seleccionados {len(empties)} Empty(s) de '{armature.name}'.",
+                f"Selected {len(empties)} Empty(s) from '{armature.name}'.",
             )
 
             try:
@@ -888,7 +1442,7 @@ class RETARGET_OT_select_and_open_bake(Operator):
                 bpy.ops.object.bake_action('INVOKE_DEFAULT')
 
         except Exception as exc:
-            self.report({'ERROR'}, f"No se pudo preparar el Bake: {exc}")
+            self.report({'ERROR'}, f"Could not prepare Bake: {exc}")
             return {'CANCELLED'}
 
         return {'FINISHED'}
@@ -921,14 +1475,14 @@ class RETARGET_OT_apply_to_rig(Operator):
         if not valid_pairs:
             self.report(
                 {'WARNING'},
-                "No hay pares hueso/Empty válidos para esta Source Armature.",
+                "No valid bone/Empty pairs found for this Source Armature.",
             )
             return {'CANCELLED'}
 
         try:
             _activate_armature_pose(context, armature)
         except Exception as exc:
-            self.report({'ERROR'}, f"No se pudo activar Source Armature: {exc}")
+            self.report({'ERROR'}, f"Could not activate Source Armature: {exc}")
             return {'CANCELLED'}
 
         applied = 0
@@ -956,7 +1510,7 @@ class RETARGET_OT_apply_to_rig(Operator):
 
         self.report(
             {'INFO'},
-            f"Retarget inverso aplicado a {applied} hueso(s) de '{armature.name}'.",
+            f"Retarget constraints applied to {applied} bone(s) in '{armature.name}'.",
         )
         return {'FINISHED'}
 
@@ -974,7 +1528,7 @@ class RETARGET_OT_select_rig_and_open_bake(Operator):
         try:
             _activate_armature_pose(context, armature)
         except Exception as exc:
-            self.report({'ERROR'}, f"No se pudo activar Source Armature: {exc}")
+            self.report({'ERROR'}, f"Could not activate Source Armature: {exc}")
             return {'CANCELLED'}
 
         for pb in armature.pose.bones:
@@ -1006,13 +1560,13 @@ class RETARGET_OT_select_rig_and_open_bake(Operator):
         if selected_bones == 0:
             self.report(
                 {'WARNING'},
-                "No se encontraron huesos activos con Empty válido para seleccionar en Pose Mode.",
+                "No active bones with a valid Empty were found to select in Pose Mode.",
             )
             return {'CANCELLED'}
 
         self.report(
             {'INFO'},
-            f"'{armature.name}' en Pose Mode con {selected_bones} hueso(s) seleccionado(s) listo para Bake.",
+            f"'{armature.name}' is in Pose Mode with {selected_bones} bone(s) selected and ready to Bake.",
         )
 
         try:
@@ -1025,7 +1579,7 @@ class RETARGET_OT_select_rig_and_open_bake(Operator):
             try:
                 bpy.ops.object.bake_action('INVOKE_DEFAULT')
             except Exception as exc:
-                self.report({'ERROR'}, f"No se pudo abrir el menú de Bake: {exc}")
+                self.report({'ERROR'}, f"Could not open the Bake menu: {exc}")
                 return {'CANCELLED'}
 
         return {'FINISHED'}
@@ -1051,7 +1605,7 @@ class RETARGET_OT_clear_rig_constraints(Operator):
         try:
             _activate_armature_pose(context, armature)
         except Exception as exc:
-            self.report({'ERROR'}, f"No se pudo activar Source Armature: {exc}")
+            self.report({'ERROR'}, f"Could not activate Source Armature: {exc}")
             return {'CANCELLED'}
 
         cleared = 0
@@ -1077,13 +1631,13 @@ class RETARGET_OT_clear_rig_constraints(Operator):
 
         self.report(
             {'INFO'},
-            f"Eliminadas {cleared} restricciones de '{armature.name}'.",
+            f"Removed {cleared} constraint(s) from '{armature.name}'.",
         )
         return {'FINISHED'}
 
 
 # ──────────────────────────────────────────────
-# 4.5. OPERADORES PARTE 3: TORSO -> ROOT MOTION
+# 4.5. MODULE 2 OPERATORS: TORSO -> ROOT MOTION
 # ──────────────────────────────────────────────
 class RETARGET_OT_create_root_empty(Operator):
     bl_idname = "retarget.create_root_empty"
@@ -1099,32 +1653,32 @@ class RETARGET_OT_create_root_empty(Operator):
         torso_slot = _slot_property(context.scene, "torso")
 
         if not root_slot or not root_slot.bone_name:
-            self.report({'ERROR'}, "Asigna primero el hueso Root en la sección Root Motion.")
+            self.report({'ERROR'}, "Assign the Root Bone in Module 2 first.")
             return {'CANCELLED'}
 
         if not torso_slot or not torso_slot.bone_name:
-            self.report({'ERROR'}, "Asigna primero el hueso Torso en la lista principal.")
+            self.report({'ERROR'}, "Assign the Torso bone in Bone Slots first.")
             return {'CANCELLED'}
 
         root_bone = _get_bone(armature, root_slot.bone_name)
         torso_bone = _get_bone(armature, torso_slot.bone_name)
 
         if not root_bone:
-            self.report({'ERROR'}, f"Hueso Root '{root_slot.bone_name}' no encontrado en Source Armature.")
+            self.report({'ERROR'}, f"Root bone '{root_slot.bone_name}' not found in Source Armature.")
             return {'CANCELLED'}
 
         if not torso_bone:
-            self.report({'ERROR'}, f"Hueso Torso '{torso_slot.bone_name}' no encontrado en Source Armature.")
+            self.report({'ERROR'}, f"Torso bone '{torso_slot.bone_name}' not found in Source Armature.")
             return {'CANCELLED'}
 
         existing = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False)
         if existing:
-            self.report({'WARNING'}, f"Ya existe el Empty de Root Motion: '{existing.name}'.")
+            self.report({'WARNING'}, f"Root Motion Empty already exists: '{existing.name}'.")
             return {'CANCELLED'}
 
         pose_root = armature.pose.bones.get(root_bone.name)
         if not pose_root:
-            self.report({'ERROR'}, "No se encontró el Pose Bone del Root.")
+            self.report({'ERROR'}, "Root Pose Bone not found.")
             return {'CANCELLED'}
 
         base_name = root_slot.empty_name or "RET_Root_Motion"
@@ -1160,7 +1714,7 @@ class RETARGET_OT_create_root_empty(Operator):
         cl.owner_space = 'WORLD'
         cl.target_space = 'WORLD'
 
-        self.report({'INFO'}, f"Root Motion Empty creado: '{empty.name}' copiando XY (Offset) de '{torso_bone.name}'.")
+        self.report({'INFO'}, f"Root Motion Empty created: '{empty.name}' copying XY (Offset) from '{torso_bone.name}'.")
         return {'FINISHED'}
 
 
@@ -1204,7 +1758,7 @@ class RETARGET_OT_clear_root_constraints(Operator):
 
         self.report(
             {'INFO'},
-            f"Constraints de Root limpiados (Empty: {empty_cleared}, Bone: {bone_cleared}).",
+            f"Root constraints cleared (Empty: {empty_cleared}, Bone: {bone_cleared}).",
         )
         return {'FINISHED'}
 
@@ -1221,7 +1775,7 @@ class RETARGET_OT_bake_root_empty(Operator):
 
         empty = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False)
         if not empty:
-            self.report({'WARNING'}, "No hay un Empty de Root Motion creado para esta armature.")
+            self.report({'WARNING'}, "No Root Motion Empty has been created for this armature.")
             return {'CANCELLED'}
 
         try:
@@ -1230,13 +1784,13 @@ class RETARGET_OT_bake_root_empty(Operator):
             empty.select_set(True)
             context.view_layer.objects.active = empty
 
-            self.report({'INFO'}, f"Empty '{empty.name}' seleccionado para Bake.")
+            self.report({'INFO'}, f"Empty '{empty.name}' selected for Bake.")
             try:
                 bpy.ops.nla.bake('INVOKE_DEFAULT', visual_keying=True, clear_constraints=False)
             except Exception:
                 bpy.ops.object.bake_action('INVOKE_DEFAULT')
         except Exception as exc:
-            self.report({'ERROR'}, f"No se pudo preparar el Bake: {exc}")
+            self.report({'ERROR'}, f"Could not prepare Bake: {exc}")
             return {'CANCELLED'}
 
         return {'FINISHED'}
@@ -1254,23 +1808,23 @@ class RETARGET_OT_apply_root_to_bone(Operator):
 
         root_slot = _slot_property(context.scene, "root_bone")
         if not root_slot or not root_slot.bone_name:
-            self.report({'ERROR'}, "Asigna un Root Bone primero.")
+            self.report({'ERROR'}, "Assign a Root Bone first.")
             return {'CANCELLED'}
 
         empty = _get_slot_empty(context, armature, "root_bone", adopt_legacy=False, allow_cross_armature=True)
         if not empty:
-            self.report({'ERROR'}, "No se encontró el Empty de Root Motion.")
+            self.report({'ERROR'}, "Root Motion Empty not found.")
             return {'CANCELLED'}
 
         pose_root = armature.pose.bones.get(root_slot.bone_name)
         if not pose_root:
-            self.report({'ERROR'}, f"Pose Bone '{root_slot.bone_name}' no encontrado.")
+            self.report({'ERROR'}, f"Pose Bone '{root_slot.bone_name}' not found.")
             return {'CANCELLED'}
 
         try:
             _activate_armature_pose(context, armature)
         except Exception as exc:
-            self.report({'ERROR'}, f"No se pudo activar Source Armature: {exc}")
+            self.report({'ERROR'}, f"Could not activate Source Armature: {exc}")
             return {'CANCELLED'}
 
         for c in list(pose_root.constraints):
@@ -1286,7 +1840,7 @@ class RETARGET_OT_apply_root_to_bone(Operator):
         cl.owner_space = 'WORLD'
         cl.target_space = 'WORLD'
 
-        self.report({'INFO'}, f"Constraint aplicada al Root Bone '{pose_root.name}'.")
+        self.report({'INFO'}, f"Root motion constraint applied to Root Bone '{pose_root.name}'.")
         return {'FINISHED'}
 
 
@@ -1302,19 +1856,19 @@ class RETARGET_OT_select_root_and_bake(Operator):
 
         root_slot = _slot_property(context.scene, "root_bone")
         if not root_slot or not root_slot.bone_name:
-            self.report({'ERROR'}, "Asigna un Root Bone primero.")
+            self.report({'ERROR'}, "Assign a Root Bone first.")
             return {'CANCELLED'}
 
         pose_root = armature.pose.bones.get(root_slot.bone_name)
         bone_data = armature.data.bones.get(root_slot.bone_name)
         if not pose_root or not bone_data:
-            self.report({'ERROR'}, f"Root Bone '{root_slot.bone_name}' no encontrado.")
+            self.report({'ERROR'}, f"Root Bone '{root_slot.bone_name}' not found.")
             return {'CANCELLED'}
 
         try:
             _activate_armature_pose(context, armature)
         except Exception as exc:
-            self.report({'ERROR'}, f"No se pudo activar Source Armature: {exc}")
+            self.report({'ERROR'}, f"Could not activate Source Armature: {exc}")
             return {'CANCELLED'}
 
         for pb in armature.pose.bones:
@@ -1323,7 +1877,7 @@ class RETARGET_OT_select_root_and_bake(Operator):
         pose_root.select = True
         armature.data.bones.active = bone_data
 
-        self.report({'INFO'}, f"Root Bone '{pose_root.name}' seleccionado en Pose Mode para Bake.")
+        self.report({'INFO'}, f"Root Bone '{pose_root.name}' selected in Pose Mode for Bake.")
 
         try:
             bpy.ops.nla.bake('INVOKE_DEFAULT', visual_keying=True, clear_constraints=False)
@@ -1331,7 +1885,7 @@ class RETARGET_OT_select_root_and_bake(Operator):
             try:
                 bpy.ops.object.bake_action('INVOKE_DEFAULT')
             except Exception as exc:
-                self.report({'ERROR'}, f"No se pudo abrir el menú de Bake: {exc}")
+                self.report({'ERROR'}, f"Could not open the Bake menu: {exc}")
                 return {'CANCELLED'}
 
         return {'FINISHED'}
@@ -1378,13 +1932,13 @@ class RETARGET_OT_clean_root_motion(Operator):
 
         self.report(
             {'INFO'},
-            f"Root Motion limpiado: {constraints_removed} restricción(es) y {int(empty_removed)} Empty eliminado(s).",
+            f"Root Motion cleaned: {constraints_removed} constraint(s) and {int(empty_removed)} Empty(s) deleted.",
         )
         return {'FINISHED'}
 
 
 # ──────────────────────────────────────────────
-# 4.6. LIMPIEZA DE CURVAS (PARTE 2) Y LIMPIEZA FINAL DEL SETUP
+# 4.6. CURVE CLEANUP (MODULE 1 STEP 2) & SETUP CLEANUP
 # ──────────────────────────────────────────────
 class RETARGET_OT_clean_curves_and_empties(Operator):
     bl_idname = "retarget.clean_curves_and_empties"
@@ -1406,7 +1960,7 @@ class RETARGET_OT_clean_curves_and_empties(Operator):
         try:
             _activate_armature_pose(context, armature)
         except Exception as exc:
-            self.report({'ERROR'}, f"No se pudo activar Source Armature: {exc}")
+            self.report({'ERROR'}, f"Could not activate Source Armature: {exc}")
             return {'CANCELLED'}
 
         for key, _, _ in SLOTS_CONFIG:
@@ -1467,7 +2021,7 @@ class RETARGET_OT_clean_curves_and_empties(Operator):
         elif action and not action_slot:
             self.report(
                 {'WARNING'},
-                "La Action no tiene Action Slot activo; no se modificaron curvas.",
+                "The Action has no active Action Slot; no curves were modified.",
             )
 
         empties_removed = 0
@@ -1482,10 +2036,10 @@ class RETARGET_OT_clean_curves_and_empties(Operator):
 
         self.report(
             {'INFO'},
-            f"Limpieza de '{armature.name}': "
-            f"{constraints_removed} restricciones, "
-            f"{curves_removed} curvas Location y "
-            f"{empties_removed} Empties propios eliminados.",
+            f"Cleaned '{armature.name}': "
+            f"{constraints_removed} constraint(s), "
+            f"{curves_removed} Location curve(s), and "
+            f"{empties_removed} owned Empty/Empties removed.",
         )
         return {'FINISHED'}
 
@@ -1526,18 +2080,18 @@ class RETARGET_OT_clean_all_setup(Operator):
                         pose_bone.constraints.remove(constraint)
                         constraints_removed += 1
         except Exception as exc:
-            self.report({'ERROR'}, f"No se pudo limpiar constraints del Rig: {exc}")
+            self.report({'ERROR'}, f"Could not clear Rig constraints: {exc}")
             return {'CANCELLED'}
 
         empties_removed = 0
         for key, _, _ in SLOTS_CONFIG:
-            if _remove_empty_if_owned(context, armature, key):
+            if _remove_slot_empty_any_armature(context, armature, key):
                 empties_removed += 1
                 slot_prop = _slot_property(context.scene, key)
                 slot_prop.empty_name = ""
                 slot_prop.created = False
 
-        if _remove_empty_if_owned(context, armature, "root_bone"):
+        if _remove_slot_empty_any_armature(context, armature, "root_bone"):
             empties_removed += 1
             root_slot = _slot_property(context.scene, "root_bone")
             if root_slot:
@@ -1548,8 +2102,40 @@ class RETARGET_OT_clean_all_setup(Operator):
 
         self.report(
             {'INFO'},
-            f"Setup limpiado en '{armature.name}': "
-            f"{constraints_removed} constraints y {empties_removed} Empties propios eliminados (curvas conservadas).",
+            f"Setup cleaned on '{armature.name}': "
+            f"{constraints_removed} constraint(s) and {empties_removed} Empty/Empties deleted (animation curves preserved).",
+        )
+        return {'FINISHED'}
+
+
+class RETARGET_OT_clear_all_bone_names(Operator):
+    """Clears assigned bone names (including Root Bone) without deleting Empties or affecting Props."""
+    bl_idname = "retarget.clear_all_bone_names"
+    bl_label = "Clear Bone Names"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def execute(self, context):
+        scene = context.scene
+        cleared_count = 0
+
+        for key, _, _ in SLOTS_CONFIG:
+            slot_prop = _slot_property(scene, key)
+            if slot_prop and slot_prop.bone_name:
+                slot_prop.bone_name = ""
+                cleared_count += 1
+
+        root_slot = _slot_property(scene, "root_bone")
+        if root_slot and root_slot.bone_name:
+            root_slot.bone_name = ""
+            cleared_count += 1
+
+        armature = _get_armature(context)
+        if armature is not None and BONE_MAP_PROP in armature:
+            del armature[BONE_MAP_PROP]
+
+        self.report(
+            {'INFO'},
+            f"Bone names cleared in {cleared_count} slot(s) (Empties and Props preserved).",
         )
         return {'FINISHED'}
 
@@ -1576,16 +2162,16 @@ class RETARGET_OT_clear_all(Operator):
 
         self.report(
             {'INFO'},
-            f"{removed} Empty(s) de '{armature.name}' eliminados.",
+            f"{removed} Empty/Empties from '{armature.name}' deleted.",
         )
         return {'FINISHED'}
 
 
 # ──────────────────────────────────────────────
-# 4.7. OPERADORES MÓDULO PROP -> EMPTIES (100% LIBRE DE SOURCE ARMATURE)
+# 4.7. MODULE 3 OPERATORS: PROP -> EMPTIES (INDEPENDENT OF SOURCE ARMATURE)
 # ──────────────────────────────────────────────
 class RETARGET_OT_prop_pick_source_bone(Operator):
-    """Captura el hueso seleccionado de Prop Obj (Armature) en Pose Mode."""
+    """Captures the selected bone from Prop Obj (Armature) in Pose Mode."""
     bl_idname = "retarget.prop_pick_source_bone"
     bl_label = "Pick Prop Bone"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1599,7 +2185,7 @@ class RETARGET_OT_prop_pick_source_bone(Operator):
 
         prop_arm = prop_slot.prop_object
         if prop_arm is None or prop_arm.type != 'ARMATURE':
-            self.report({'ERROR'}, "Asigna primero una Armature en Prop Obj.")
+            self.report({'ERROR'}, "Assign an Armature in Prop Obj first.")
             return {'CANCELLED'}
 
         selected_bone = next((pb for pb in prop_arm.pose.bones if pb.select), None)
@@ -1608,7 +2194,7 @@ class RETARGET_OT_prop_pick_source_bone(Operator):
         elif prop_arm.data.bones.active:
             bone_name = prop_arm.data.bones.active.name
         else:
-            self.report({'ERROR'}, f"Selecciona un hueso en '{prop_arm.name}' (Pose Mode).")
+            self.report({'ERROR'}, f"Select a bone in '{prop_arm.name}' (Pose Mode).")
             return {'CANCELLED'}
 
         prop_slot.prop_bone_name = bone_name
@@ -1616,12 +2202,12 @@ class RETARGET_OT_prop_pick_source_bone(Operator):
             label = prop_slot.prop_label.strip() or self.slot.replace('_', ' ').title()
             prop_slot.empty_name = f"RET_Prop_{label.replace(' ', '_')}"
 
-        self.report({'INFO'}, f"Prop Bone capturado: {bone_name}")
+        self.report({'INFO'}, f"Prop Bone captured: {bone_name}")
         return {'FINISHED'}
 
 
 class RETARGET_OT_prop_select_source_bone(Operator):
-    """Selecciona el Prop Bone en el viewport (Pose Mode)."""
+    """Selects the Prop Bone in the viewport (Pose Mode)."""
     bl_idname = "retarget.prop_select_source_bone"
     bl_label = "Select Prop Bone in Viewport"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1635,16 +2221,16 @@ class RETARGET_OT_prop_select_source_bone(Operator):
 
         prop_arm = prop_slot.prop_object
         if prop_arm is None or prop_arm.type != 'ARMATURE':
-            self.report({'ERROR'}, "Asigna una Armature en Prop Obj.")
+            self.report({'ERROR'}, "Assign an Armature in Prop Obj.")
             return {'CANCELLED'}
 
         if not prop_slot.prop_bone_name:
-            self.report({'ERROR'}, "No hay Prop Bone asignado.")
+            self.report({'ERROR'}, "No Prop Bone is assigned.")
             return {'CANCELLED'}
 
         bone = _get_bone(prop_arm, prop_slot.prop_bone_name)
         if not bone:
-            self.report({'ERROR'}, f"Hueso '{prop_slot.prop_bone_name}' no encontrado en '{prop_arm.name}'.")
+            self.report({'ERROR'}, f"Bone '{prop_slot.prop_bone_name}' not found in '{prop_arm.name}'.")
             return {'CANCELLED'}
 
         _activate_armature_pose(context, prop_arm)
@@ -1655,12 +2241,12 @@ class RETARGET_OT_prop_select_source_bone(Operator):
             pb.select = True
             prop_arm.data.bones.active = bone
 
-        self.report({'INFO'}, f"Prop Bone seleccionado: {bone.name}")
+        self.report({'INFO'}, f"Prop Bone selected: {bone.name}")
         return {'FINISHED'}
 
 
 class RETARGET_OT_prop_pick_target_bone(Operator):
-    """Captura el hueso seleccionado de Target Obj (Armature) en Pose Mode."""
+    """Captures the selected bone from Target Obj (Armature) in Pose Mode."""
     bl_idname = "retarget.prop_pick_target_bone"
     bl_label = "Pick Target Bone"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1674,7 +2260,7 @@ class RETARGET_OT_prop_pick_target_bone(Operator):
 
         target_arm = prop_slot.target_object
         if target_arm is None or target_arm.type != 'ARMATURE':
-            self.report({'ERROR'}, "Asigna primero una Armature en Target Obj.")
+            self.report({'ERROR'}, "Assign an Armature in Target Obj first.")
             return {'CANCELLED'}
 
         selected_bone = next((pb for pb in target_arm.pose.bones if pb.select), None)
@@ -1683,16 +2269,16 @@ class RETARGET_OT_prop_pick_target_bone(Operator):
         elif target_arm.data.bones.active:
             bone_name = target_arm.data.bones.active.name
         else:
-            self.report({'ERROR'}, f"Selecciona un hueso en '{target_arm.name}' (Pose Mode).")
+            self.report({'ERROR'}, f"Select a bone in '{target_arm.name}' (Pose Mode).")
             return {'CANCELLED'}
 
         prop_slot.target_bone_name = bone_name
-        self.report({'INFO'}, f"Target Bone capturado: {bone_name}")
+        self.report({'INFO'}, f"Target Bone captured: {bone_name}")
         return {'FINISHED'}
 
 
 class RETARGET_OT_prop_select_target_bone(Operator):
-    """Selecciona el Target Bone en el viewport (Pose Mode)."""
+    """Selects the Target Bone in the viewport (Pose Mode)."""
     bl_idname = "retarget.prop_select_target_bone"
     bl_label = "Select Target Bone in Viewport"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1706,16 +2292,16 @@ class RETARGET_OT_prop_select_target_bone(Operator):
 
         target_arm = prop_slot.target_object
         if target_arm is None or target_arm.type != 'ARMATURE':
-            self.report({'ERROR'}, "Asigna una Armature en Target Obj.")
+            self.report({'ERROR'}, "Assign an Armature in Target Obj.")
             return {'CANCELLED'}
 
         if not prop_slot.target_bone_name:
-            self.report({'ERROR'}, "No hay Target Bone asignado.")
+            self.report({'ERROR'}, "No Target Bone is assigned.")
             return {'CANCELLED'}
 
         bone = _get_bone(target_arm, prop_slot.target_bone_name)
         if not bone:
-            self.report({'ERROR'}, f"Hueso '{prop_slot.target_bone_name}' no encontrado en '{target_arm.name}'.")
+            self.report({'ERROR'}, f"Bone '{prop_slot.target_bone_name}' not found in '{target_arm.name}'.")
             return {'CANCELLED'}
 
         _activate_armature_pose(context, target_arm)
@@ -1726,12 +2312,12 @@ class RETARGET_OT_prop_select_target_bone(Operator):
             pb.select = True
             target_arm.data.bones.active = bone
 
-        self.report({'INFO'}, f"Target Bone seleccionado: {bone.name}")
+        self.report({'INFO'}, f"Target Bone selected: {bone.name}")
         return {'FINISHED'}
 
 
 class RETARGET_OT_prop_clear_slot(Operator):
-    """Limpia el slot de prop y elimina su Empty asociado."""
+    """Clears the prop slot and removes its associated Empty."""
     bl_idname = "retarget.prop_clear_slot"
     bl_label = "Clear Prop Slot"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1753,12 +2339,12 @@ class RETARGET_OT_prop_clear_slot(Operator):
         prop_slot.created = False
         _remove_props_collection_if_unused()
 
-        self.report({'INFO'}, "Slot de Prop limpiado.")
+        self.report({'INFO'}, "Prop slot cleared.")
         return {'FINISHED'}
 
 
 class RETARGET_OT_prop_create_empty(Operator):
-    """Crea un Empty que sigue el movimiento/rotación del Prop (Objeto o Hueso)."""
+    """Creates an Empty that tracks the location/rotation of the Prop (Object or Bone)."""
     bl_idname = "retarget.prop_create_empty"
     bl_label = "Create Prop Empty"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1772,20 +2358,20 @@ class RETARGET_OT_prop_create_empty(Operator):
 
         prop_obj = prop_slot.prop_object
         if prop_obj is None:
-            self.report({'ERROR'}, "Asigna un Prop Object o Armature primero.")
+            self.report({'ERROR'}, "Assign a Prop Object or Armature first.")
             return {'CANCELLED'}
 
         if prop_slot.source_type == 'BONE':
             if prop_obj.type != 'ARMATURE':
-                self.report({'ERROR'}, "El objeto asignado debe ser una Armature para modo Armature Bone.")
+                self.report({'ERROR'}, "The assigned object must be an Armature for Armature Bone mode.")
                 return {'CANCELLED'}
             if not prop_slot.prop_bone_name or not _get_bone(prop_obj, prop_slot.prop_bone_name):
-                self.report({'ERROR'}, "Asigna un hueso válido en Prop Bone.")
+                self.report({'ERROR'}, "Assign a valid bone in Prop Bone.")
                 return {'CANCELLED'}
 
         existing = _get_prop_slot_empty(context, self.slot)
         if existing:
-            self.report({'WARNING'}, f"Este Prop ya tiene el Empty '{existing.name}'.")
+            self.report({'WARNING'}, f"This Prop already has the Empty '{existing.name}'.")
             return {'CANCELLED'}
 
         label = prop_slot.prop_label.strip() or self.slot.replace('_', ' ').title()
@@ -1832,12 +2418,12 @@ class RETARGET_OT_prop_create_empty(Operator):
         cr.owner_space = 'WORLD'
         cr.target_space = 'WORLD'
 
-        self.report({'INFO'}, f"Prop Empty creado: '{empty.name}'.")
+        self.report({'INFO'}, f"Prop Empty created: '{empty.name}'.")
         return {'FINISHED'}
 
 
 class RETARGET_OT_prop_create_all(Operator):
-    """Crea Empties para todos los Props configurados."""
+    """Creates Empties for all configured Props."""
     bl_idname = "retarget.prop_create_all"
     bl_label = "Create All Prop Empties"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1852,15 +2438,15 @@ class RETARGET_OT_prop_create_all(Operator):
                     created += 1
 
         if created == 0:
-            self.report({'WARNING'}, "No se crearon Prop Empties (revisa los slots configurados).")
+            self.report({'WARNING'}, "No Prop Empties were created (check configured slots).")
             return {'CANCELLED'}
 
-        self.report({'INFO'}, f"Creados {created} Prop Empty(s).")
+        self.report({'INFO'}, f"Created {created} Prop Empty/Empties.")
         return {'FINISHED'}
 
 
 class RETARGET_OT_prop_clear_all(Operator):
-    """Elimina todos los Prop Empties creados por el módulo de Props."""
+    """Removes all Prop Empties created by the Props module."""
     bl_idname = "retarget.prop_clear_all"
     bl_label = "Delete All Empties"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1878,12 +2464,12 @@ class RETARGET_OT_prop_clear_all(Operator):
 
         _remove_props_collection_if_unused()
 
-        self.report({'INFO'}, f"{removed} Prop Empty(s) eliminados.")
+        self.report({'INFO'}, f"{removed} Prop Empty/Empties deleted.")
         return {'FINISHED'}
 
 
 class RETARGET_OT_prop_clear_empties_constraints(Operator):
-    """Elimina las restricciones de los Prop Empties después de hacer Bake."""
+    """Removes constraints from Prop Empties after baking."""
     bl_idname = "retarget.prop_clear_empties_constraints"
     bl_label = "Clear Prop Empties Constraints"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1896,12 +2482,12 @@ class RETARGET_OT_prop_clear_empties_constraints(Operator):
                 emp.constraints.clear()
                 cleared += 1
 
-        self.report({'INFO'}, f"Constraints eliminados en {cleared} Prop Empty(s).")
+        self.report({'INFO'}, f"Constraints removed from {cleared} Prop Empty/Empties.")
         return {'FINISHED'}
 
 
 class RETARGET_OT_prop_bake_empties(Operator):
-    """Selecciona los Prop Empties activos y abre Bake."""
+    """Selects active Prop Empties and opens the Bake dialog."""
     bl_idname = "retarget.prop_bake_empties"
     bl_label = "Select Prop Empties & Bake"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1909,7 +2495,7 @@ class RETARGET_OT_prop_bake_empties(Operator):
     def execute(self, context):
         empties = _get_registered_prop_empties(context)
         if not empties:
-            self.report({'WARNING'}, "No hay Prop Empties activos para hornear.")
+            self.report({'WARNING'}, "No active Prop Empties to bake.")
             return {'CANCELLED'}
 
         _ensure_object_mode(context)
@@ -1927,7 +2513,7 @@ class RETARGET_OT_prop_bake_empties(Operator):
 
 
 class RETARGET_OT_prop_apply_to_target(Operator):
-    """Step 2: Aplica la animación de los Prop Empties al Target (Objeto o Hueso)."""
+    """Step 2: Applies Prop Empty animation to the Target (Object or Bone)."""
     bl_idname = "retarget.prop_apply_to_target"
     bl_label = "Empties → Prop (Apply)"
     bl_options = {'REGISTER', 'UNDO'}
@@ -1990,15 +2576,15 @@ class RETARGET_OT_prop_apply_to_target(Operator):
                 applied += 1
 
         if applied == 0:
-            self.report({'WARNING'}, "No hay pares válidos (Prop Empty + Target configurado).")
+            self.report({'WARNING'}, "No valid pairs found (Prop Empty + configured Target).")
             return {'CANCELLED'}
 
-        self.report({'INFO'}, f"Prop retarget aplicado a {applied} destino(s).")
+        self.report({'INFO'}, f"Prop retarget constraints applied to {applied} target(s).")
         return {'FINISHED'}
 
 
 class RETARGET_OT_prop_clear_target_constraints(Operator):
-    """Elimina las restricciones de retarget aplicadas en los Targets de Props."""
+    """Removes retarget constraints applied to Prop Targets."""
     bl_idname = "retarget.prop_clear_target_constraints"
     bl_label = "Clear Target Constraints"
     bl_options = {'REGISTER', 'UNDO'}
@@ -2038,12 +2624,12 @@ class RETARGET_OT_prop_clear_target_constraints(Operator):
                         target_obj.constraints.remove(c)
                         cleared += 1
 
-        self.report({'INFO'}, f"Eliminadas {cleared} restricciones en los Targets de Prop.")
+        self.report({'INFO'}, f"Removed {cleared} constraint(s) from Prop Targets.")
         return {'FINISHED'}
 
 
 class RETARGET_OT_prop_select_target_and_bake(Operator):
-    """Selecciona los Targets vinculados a Prop Empties (Objeto o Pose Bone) y abre Bake."""
+    """Selects Targets linked to Prop Empties (Object or Pose Bone) and opens the Bake dialog."""
     bl_idname = "retarget.prop_select_target_and_bake"
     bl_label = "Select Targets & Bake"
     bl_options = {'REGISTER', 'UNDO'}
@@ -2070,13 +2656,13 @@ class RETARGET_OT_prop_select_target_and_bake(Operator):
                 object_entries.append(target_obj)
 
         if not bone_entries and not object_entries:
-            self.report({'WARNING'}, "No se encontraron Targets válidos vinculados a Prop Empties.")
+            self.report({'WARNING'}, "No valid Targets linked to Prop Empties were found.")
             return {'CANCELLED'}
 
         if bone_entries and object_entries:
             self.report(
                 {'WARNING'},
-                "Hay Targets mixtos (Objetos y Huesos). Hornea primero un tipo o desactiva temporalmente uno.",
+                "Mixed Targets detected (Objects and Bones). Bake one type first or temporarily clear the other.",
             )
             return {'CANCELLED'}
 
@@ -2114,7 +2700,7 @@ class RETARGET_OT_prop_select_target_and_bake(Operator):
 
 
 class RETARGET_OT_prop_clean_all(Operator):
-    """Limpia constraints de props en Targets y borra los Prop Empties (conserva curvas)."""
+    """Clears prop constraints on Targets and deletes Prop Empties (preserves animation curves)."""
     bl_idname = "retarget.prop_clean_all"
     bl_label = "Clean Prop Setup"
     bl_options = {'REGISTER', 'UNDO'}
@@ -2165,17 +2751,31 @@ class RETARGET_OT_prop_clean_all(Operator):
 
         self.report(
             {'INFO'},
-            f"Prop Setup limpiado: {constraints_removed} constraints y {empties_removed} Prop Empty(s) eliminados.",
+            f"Prop Setup cleaned: {constraints_removed} constraint(s) and {empties_removed} Prop Empty/Empties deleted.",
         )
         return {'FINISHED'}
 
 
+def _draw_step2_transition_reminder(layout, step_label="Step 2"):
+    reminder_box = layout.box()
+    col_rem = reminder_box.column(align=True)
+    col_rem.scale_y = 0.8
+    col_rem.label(
+        text=f"Before {step_label}: clear constraints and",
+        icon='INFO',
+    )
+    col_rem.label(
+        text="mute/disable animation actions or NLA strips.",
+        icon='BLANK1',
+    )
+
+
 # ──────────────────────────────────────────────
-# 5. PANELES (N SIDEBAR - MISMA PESTAÑA RETARGET)
+# 5. PANELS (N SIDEBAR - RETARGET TAB)
 # ──────────────────────────────────────────────
-class RETARGET_PT_panel(Panel):
-    bl_label = "Retarget → Empties"
-    bl_idname = "RETARGET_PT_panel"
+class RETARGET_PT_module1_panel(Panel):
+    bl_label = "Module 1 & 2: Retarget → Empties"
+    bl_idname = "RETARGET_PT_module1_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Retarget"
@@ -2193,13 +2793,13 @@ class RETARGET_PT_panel(Panel):
         if armature is None:
             warning = layout.box()
             warning.label(
-                text="Asigna una Source Armature para el módulo principal.",
+                text="Assign a Source Armature for Module 1 and Module 2.",
                 icon='ERROR',
             )
 
         layout.separator()
 
-        # --- DESPLEGABLE MAESTRO DE BONE SLOTS + SYMMETRIZE ---
+        # --- MASTER BONE SLOTS DROPDOWN + SYMMETRIZE ---
         slots_container = layout.box()
         slots_header = slots_container.row(align=True)
         slots_tri = 'TRIA_DOWN' if scene.retarget_slots_expanded else 'TRIA_RIGHT'
@@ -2218,8 +2818,44 @@ class RETARGET_PT_panel(Panel):
             text="Symmetrize",
             icon='ARROW_LEFTRIGHT',
         )
+        slots_header.operator(
+            "retarget.clear_all_bone_names",
+            text="",
+            icon='LOOP_BACK',
+        )
 
         if scene.retarget_slots_expanded:
+            preset_box = slots_container.box()
+            row_preset = preset_box.row(align=True)
+            row_preset.prop(scene, "retarget_preset", text="")
+            row_preset.operator(
+                "retarget.save_custom_preset",
+                text="",
+                icon='FILE_TICK',
+            )
+            if (
+                scene.retarget_preset != 'AUTO'
+                and scene.retarget_preset not in BUILTIN_BONE_PRESETS
+            ):
+                row_preset.operator(
+                    "retarget.delete_custom_preset",
+                    text="",
+                    icon='TRASH',
+                )
+
+            row_apply_preset = preset_box.row(align=True)
+            row_apply_preset.operator(
+                "retarget.apply_bone_preset",
+                text="Auto-Fill Bones",
+                icon='VIEWZOOM',
+            )
+            row_apply_preset.prop(
+                scene,
+                "retarget_preset_overwrite",
+                text="Overwrite",
+                toggle=True,
+            )
+
             for key, label, _ in SLOTS_CONFIG:
                 slot_prop = _slot_property(scene, key)
                 box = slots_container.box()
@@ -2298,81 +2934,69 @@ class RETARGET_PT_panel(Panel):
 
         layout.separator()
 
-        # --- PART 1: RIG -> EMPTIES ---
-        part_one = layout.box()
-        p1_head = part_one.row(align=True)
-        p1_tri = 'TRIA_DOWN' if scene.retarget_part1_expanded else 'TRIA_RIGHT'
-        p1_head.prop(
+        # --- MODULE 1 / STEP 1: RIG -> EMPTIES ---
+        m1_step1 = layout.box()
+        m1s1_head = m1_step1.row(align=True)
+        m1s1_tri = 'TRIA_DOWN' if scene.retarget_m1_step1_expanded else 'TRIA_RIGHT'
+        m1s1_head.prop(
             scene,
-            "retarget_part1_expanded",
-            text="Part 1: Rig → Empties",
-            icon=p1_tri,
+            "retarget_m1_step1_expanded",
+            text="Step 1: Rig → Empties",
+            icon=m1s1_tri,
             emboss=False,
         )
-        p1_head.label(text="", icon='OUTLINER_OB_EMPTY')
+        m1s1_head.label(text="", icon='OUTLINER_OB_EMPTY')
 
-        if scene.retarget_part1_expanded:
-            row = part_one.row(align=True)
+        if scene.retarget_m1_step1_expanded:
+            row = m1_step1.row(align=True)
             row.operator("retarget.create_all", icon='ADD')
             row.operator("retarget.clear_all", icon='REMOVE')
-            part_one.operator(
+            m1_step1.operator(
                 "retarget.clear_constraints_empties",
                 icon='CONSTRAINT_BONE',
             )
-            part_one.operator(
+            m1_step1.operator(
                 "retarget.select_and_open_bake",
                 icon='RENDER_ANIMATION',
             )
 
         layout.separator()
-
-        reminder_box = layout.box()
-        col_rem = reminder_box.column(align=True)
-        col_rem.scale_y = 0.8
-        col_rem.label(
-            text="Remember to mute original animation",
-            icon='INFO',
-        )
-        col_rem.label(
-            text="strips/actions before starting Part 2.",
-            icon='BLANK1',
-        )
-
+        _draw_step2_transition_reminder(layout, step_label="Step 2")
         layout.separator()
 
-        # --- PART 2: EMPTIES -> RIG ---
-        part_two = layout.box()
-        p2_head = part_two.row(align=True)
-        p2_tri = 'TRIA_DOWN' if scene.retarget_part2_expanded else 'TRIA_RIGHT'
-        p2_head.prop(
+        # --- MODULE 1 / STEP 2: EMPTIES -> RIG ---
+        m1_step2 = layout.box()
+        m1s2_head = m1_step2.row(align=True)
+        m1s2_tri = 'TRIA_DOWN' if scene.retarget_m1_step2_expanded else 'TRIA_RIGHT'
+        m1s2_head.prop(
             scene,
-            "retarget_part2_expanded",
-            text="Part 2: Empties → Rig",
-            icon=p2_tri,
+            "retarget_m1_step2_expanded",
+            text="Step 2: Empties → Rig",
+            icon=m1s2_tri,
             emboss=False,
         )
-        p2_head.label(text="", icon='ARMATURE_DATA')
+        m1s2_head.label(text="", icon='ARMATURE_DATA')
 
-        if scene.retarget_part2_expanded:
-            part_two.operator(
+        if scene.retarget_m1_step2_expanded:
+            m1_step2.operator(
                 "retarget.apply_to_rig",
                 icon='CON_LOCLIKE',
             )
-            part_two.operator(
+            m1_step2.operator(
                 "retarget.clear_rig_constraints",
                 icon='X',
             )
-            part_two.operator(
+            m1_step2.operator(
                 "retarget.select_rig_and_open_bake",
                 icon='RENDER_ANIMATION',
             )
 
-            part_two.separator()
-            part_two.operator(
+            m1_step2.separator()
+            m1_step2.operator(
                 "retarget.clean_curves_and_empties",
                 icon='TRASH',
             )
-            warn_col = part_two.column(align=True)
+            warn_col = m1_step2.column(align=True)
             warn_col.scale_y = 0.8
             warn_col.label(
                 text="Warning: Location curves of joints",
@@ -2385,32 +3009,35 @@ class RETARGET_PT_panel(Panel):
 
         layout.separator()
 
-        # --- PART 3: TORSO -> ROOT MOTION ---
-        part_three = layout.box()
-        p3_head = part_three.row(align=True)
-        p3_tri = 'TRIA_DOWN' if scene.retarget_part3_expanded else 'TRIA_RIGHT'
-        p3_head.prop(
+        # --- MODULE 2: TORSO -> ROOT MOTION (IN SAME PANEL, SHARES SOURCE ARMATURE) ---
+        m2_container = layout.box()
+        m2_head = m2_container.row(align=True)
+        m2_tri = 'TRIA_DOWN' if scene.retarget_m2_expanded else 'TRIA_RIGHT'
+        m2_head.prop(
             scene,
-            "retarget_part3_expanded",
-            text="Part 3: Torso → Root Motion",
-            icon=p3_tri,
+            "retarget_m2_expanded",
+            text="Module 2: Torso → Root Motion",
+            icon=m2_tri,
             emboss=False,
         )
-        p3_head.label(text="", icon='ORIENTATION_GLOBAL')
+        m2_head.label(text="", icon='ORIENTATION_GLOBAL')
 
-        if scene.retarget_part3_expanded:
+        if scene.retarget_m2_expanded:
             root_slot = _slot_property(scene, "root_bone")
-            row_root = part_three.row(align=True)
+
+            root_box = m2_container.box()
+            root_box.label(text="Root Bone Target", icon='BONE_DATA')
+            row_root = root_box.row(align=True)
             if armature and armature.data:
                 row_root.prop_search(
                     root_slot,
                     "bone_name",
                     armature.data,
                     "bones",
-                    text="Root Bone",
+                    text="",
                 )
             else:
-                row_root.prop(root_slot, "bone_name", text="Root Bone")
+                row_root.prop(root_slot, "bone_name", text="")
 
             pick_root = row_root.operator("retarget.pick_bone", icon='BONE_DATA', text="")
             pick_root.slot = "root_bone"
@@ -2421,44 +3048,85 @@ class RETARGET_PT_panel(Panel):
             clr_root = row_root.operator("retarget.clear_slot", icon='X', text="")
             clr_root.slot = "root_bone"
 
-            row_rm_create = part_three.row(align=True)
-            row_rm_create.operator("retarget.create_root_empty", icon='EMPTY_ARROWS')
-            valid_root_empty = (
-                _get_slot_empty(
-                    context,
-                    armature,
-                    "root_bone",
-                    adopt_legacy=False,
-                    allow_cross_armature=True,
+            m2_container.separator()
+
+            # --- MODULE 2 / STEP 1: TORSO -> EMPTY ---
+            m2_step1 = m2_container.box()
+            m2s1_head = m2_step1.row(align=True)
+            m2s1_tri = 'TRIA_DOWN' if scene.retarget_m2_step1_expanded else 'TRIA_RIGHT'
+            m2s1_head.prop(
+                scene,
+                "retarget_m2_step1_expanded",
+                text="Step 1: Torso → Empty",
+                icon=m2s1_tri,
+                emboss=False,
+            )
+            m2s1_head.label(text="", icon='EMPTY_ARROWS')
+
+            if scene.retarget_m2_step1_expanded:
+                row_rm_create = m2_step1.row(align=True)
+                row_rm_create.operator("retarget.create_root_empty", icon='EMPTY_ARROWS')
+                valid_root_empty = (
+                    _get_slot_empty(
+                        context,
+                        armature,
+                        "root_bone",
+                        adopt_legacy=False,
+                        allow_cross_armature=True,
+                    )
+                    if armature else None
                 )
-                if armature else None
-            )
-            row_rm_create.label(
-                text="",
-                icon='CHECKMARK' if valid_root_empty else 'BLANK1',
-            )
+                row_rm_create.label(
+                    text="",
+                    icon='CHECKMARK' if valid_root_empty else 'BLANK1',
+                )
 
-            part_three.operator(
-                "retarget.clear_root_constraints",
-                icon='CONSTRAINT_BONE',
-            )
-            part_three.operator("retarget.bake_root_empty", icon='RENDER_ANIMATION')
+                m2_step1.operator(
+                    "retarget.clear_root_constraints",
+                    icon='CONSTRAINT_BONE',
+                )
+                m2_step1.operator("retarget.bake_root_empty", icon='RENDER_ANIMATION')
 
-            part_three.separator()
-            rm_step_col = part_three.column(align=True)
-            rm_step_col.scale_y = 0.8
-            rm_step_col.label(
-                text="Step 2 of 2: Clear Root Constraints",
+            m2_container.separator()
+            _draw_step2_transition_reminder(m2_container, step_label="Step 2")
+            m2_container.separator()
+
+            # --- MODULE 2 / STEP 2: EMPTY -> ROOT BONE ---
+            m2_step2 = m2_container.box()
+            m2s2_head = m2_step2.row(align=True)
+            m2s2_tri = 'TRIA_DOWN' if scene.retarget_m2_step2_expanded else 'TRIA_RIGHT'
+            m2s2_head.prop(
+                scene,
+                "retarget_m2_step2_expanded",
+                text="Step 2: Empty → Root Bone",
+                icon=m2s2_tri,
+                emboss=False,
+            )
+            m2s2_head.label(text="", icon='ORIENTATION_GLOBAL')
+
+            if scene.retarget_m2_step2_expanded:
+                m2_step2.operator("retarget.apply_root_to_bone", icon='CON_LOCLIKE')
+                m2_step2.operator(
+                    "retarget.clear_root_constraints",
+                    text="Clear Root Constraints",
+                    icon='X',
+                )
+                m2_step2.operator("retarget.select_root_and_bake", icon='RENDER_ANIMATION')
+
+            m2_container.separator()
+
+            clean_rm_box = m2_container.box()
+            clean_rm_box.operator("retarget.clean_root_motion", icon='TRASH')
+            info_rm = clean_rm_box.column(align=True)
+            info_rm.scale_y = 0.8
+            info_rm.label(
+                text="Deletes Root Empty & root RET_ constraints.",
                 icon='INFO',
             )
-            rm_step_col.label(
-                text="before applying to Root Bone.",
+            info_rm.label(
+                text="Animation curves are preserved.",
                 icon='BLANK1',
             )
-
-            part_three.operator("retarget.apply_root_to_bone", icon='CON_LOCLIKE')
-            part_three.operator("retarget.select_root_and_bake", icon='BONE_DATA')
-            part_three.operator("retarget.clean_root_motion", icon='TRASH')
 
         layout.separator()
 
@@ -2479,9 +3147,9 @@ class RETARGET_PT_panel(Panel):
         )
 
 
-class RETARGET_PT_props_subpanel(Panel):
-    bl_label = "Prop → Empties"
-    bl_idname = "RETARGET_PT_props_subpanel"
+class RETARGET_PT_module3_props_panel(Panel):
+    bl_label = "Module 3: Prop → Empties"
+    bl_idname = "RETARGET_PT_module3_props_panel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "Retarget"
@@ -2491,7 +3159,7 @@ class RETARGET_PT_props_subpanel(Panel):
         layout = self.layout
         scene = context.scene
 
-        # --- DESPLEGABLE MAESTRO DE PROP SLOTS (ABIERTO POR DEFECTO) ---
+        # --- MASTER PROP SLOTS DROPDOWN (EXPANDED BY DEFAULT) ---
         props_container = layout.box()
         props_header = props_container.row(align=True)
         props_tri = 'TRIA_DOWN' if scene.retarget_prop_slots_expanded else 'TRIA_RIGHT'
@@ -2537,7 +3205,7 @@ class RETARGET_PT_props_subpanel(Panel):
                 if prop_slot.expanded:
                     box.prop(prop_slot, "prop_label", text="Name")
 
-                    # --- ORIGEN (SOURCE) ---
+                    # --- SOURCE ---
                     box.prop(prop_slot, "source_type", text="Source")
                     box.prop(prop_slot, "prop_object", text="Prop Obj")
 
@@ -2568,7 +3236,7 @@ class RETARGET_PT_props_subpanel(Panel):
 
                     box.separator()
 
-                    # --- DESTINO (TARGET PARA STEP 2) ---
+                    # --- TARGET (FOR STEP 2) ---
                     box.prop(prop_slot, "target_type", text="Target")
                     box.prop(prop_slot, "target_object", text="Target Obj")
 
@@ -2593,64 +3261,51 @@ class RETARGET_PT_props_subpanel(Panel):
 
         layout.separator()
 
-        # --- STEP 1: PROP -> EMPTIES (DESPLEGABLE, CERRADO POR DEFECTO) ---
-        p1_box = layout.box()
-        ps1_head = p1_box.row(align=True)
-        ps1_tri = 'TRIA_DOWN' if scene.retarget_prop_step1_expanded else 'TRIA_RIGHT'
-        ps1_head.prop(
+        # --- MODULE 3 / STEP 1: PROP -> EMPTIES ---
+        m3_step1 = layout.box()
+        m3s1_head = m3_step1.row(align=True)
+        m3s1_tri = 'TRIA_DOWN' if scene.retarget_m3_step1_expanded else 'TRIA_RIGHT'
+        m3s1_head.prop(
             scene,
-            "retarget_prop_step1_expanded",
+            "retarget_m3_step1_expanded",
             text="Step 1: Prop → Empties",
-            icon=ps1_tri,
+            icon=m3s1_tri,
             emboss=False,
         )
-        ps1_head.label(text="", icon='OUTLINER_OB_EMPTY')
+        m3s1_head.label(text="", icon='OUTLINER_OB_EMPTY')
 
-        if scene.retarget_prop_step1_expanded:
-            row_p_btns = p1_box.row(align=True)
+        if scene.retarget_m3_step1_expanded:
+            row_p_btns = m3_step1.row(align=True)
             row_p_btns.operator("retarget.prop_create_all", icon='ADD')
             row_p_btns.operator("retarget.prop_clear_all", icon='REMOVE')
-            p1_box.operator("retarget.prop_clear_empties_constraints", icon='CONSTRAINT_BONE')
-            p1_box.operator("retarget.prop_bake_empties", icon='RENDER_ANIMATION')
+            m3_step1.operator("retarget.prop_clear_empties_constraints", icon='CONSTRAINT_BONE')
+            m3_step1.operator("retarget.prop_bake_empties", icon='RENDER_ANIMATION')
 
         layout.separator()
-
-        # --- ADVERTENCIA INTERMEDIA (MUTE ORIGINAL STRIPS/ACTIONS) ---
-        prop_reminder_box = layout.box()
-        col_prem = prop_reminder_box.column(align=True)
-        col_prem.scale_y = 0.8
-        col_prem.label(
-            text="Remember to mute original prop animation",
-            icon='INFO',
-        )
-        col_prem.label(
-            text="strips/actions before starting Step 2.",
-            icon='BLANK1',
-        )
-
+        _draw_step2_transition_reminder(layout, step_label="Step 2")
         layout.separator()
 
-        # --- STEP 2: EMPTIES -> PROP / TARGET (DESPLEGABLE, CERRADO POR DEFECTO) ---
-        p2_box = layout.box()
-        ps2_head = p2_box.row(align=True)
-        ps2_tri = 'TRIA_DOWN' if scene.retarget_prop_step2_expanded else 'TRIA_RIGHT'
-        ps2_head.prop(
+        # --- MODULE 3 / STEP 2: EMPTIES -> PROP / TARGET ---
+        m3_step2 = layout.box()
+        m3s2_head = m3_step2.row(align=True)
+        m3s2_tri = 'TRIA_DOWN' if scene.retarget_m3_step2_expanded else 'TRIA_RIGHT'
+        m3s2_head.prop(
             scene,
-            "retarget_prop_step2_expanded",
+            "retarget_m3_step2_expanded",
             text="Step 2: Empties → Prop",
-            icon=ps2_tri,
+            icon=m3s2_tri,
             emboss=False,
         )
-        ps2_head.label(text="", icon='ARMATURE_DATA')
+        m3s2_head.label(text="", icon='ARMATURE_DATA')
 
-        if scene.retarget_prop_step2_expanded:
-            p2_box.operator("retarget.prop_apply_to_target", icon='CON_LOCLIKE')
-            p2_box.operator("retarget.prop_clear_target_constraints", icon='X')
-            p2_box.operator("retarget.prop_select_target_and_bake", icon='RENDER_ANIMATION')
+        if scene.retarget_m3_step2_expanded:
+            m3_step2.operator("retarget.prop_apply_to_target", icon='CON_LOCLIKE')
+            m3_step2.operator("retarget.prop_clear_target_constraints", icon='X')
+            m3_step2.operator("retarget.prop_select_target_and_bake", icon='RENDER_ANIMATION')
 
         layout.separator()
 
-        # --- LIMPIEZA FINAL PROPS ---
+        # --- FINAL PROP CLEANUP ---
         clean_p_box = layout.box()
         clean_p_box.operator("retarget.prop_clean_all", icon='TRASH')
         info_p = clean_p_box.column(align=True)
@@ -2660,11 +3315,14 @@ class RETARGET_PT_props_subpanel(Panel):
 
 
 # ──────────────────────────────────────────────
-# 6. REGISTRO
+# 6. REGISTRATION
 # ──────────────────────────────────────────────
 classes = (
     RETargetSlot,
     RETargetPropSlot,
+    RETARGET_OT_apply_bone_preset,
+    RETARGET_OT_save_custom_preset,
+    RETARGET_OT_delete_custom_preset,
     RETARGET_OT_symmetrize_bones,
     RETARGET_OT_pick_bone,
     RETARGET_OT_select_bone_in_viewport,
@@ -2684,6 +3342,7 @@ classes = (
     RETARGET_OT_clean_root_motion,
     RETARGET_OT_clean_curves_and_empties,
     RETARGET_OT_clean_all_setup,
+    RETARGET_OT_clear_all_bone_names,
     RETARGET_OT_clear_all,
     RETARGET_OT_prop_pick_source_bone,
     RETARGET_OT_prop_select_source_bone,
@@ -2699,8 +3358,8 @@ classes = (
     RETARGET_OT_prop_clear_target_constraints,
     RETARGET_OT_prop_select_target_and_bake,
     RETARGET_OT_prop_clean_all,
-    RETARGET_PT_panel,
-    RETARGET_PT_props_subpanel,
+    RETARGET_PT_module1_panel,
+    RETARGET_PT_module3_props_panel,
 )
 
 
